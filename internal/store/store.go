@@ -11,7 +11,6 @@ import (
 	"github.com/DaanHessen/walker-tui/internal/engine"
 	"github.com/DaanHessen/walker-tui/internal/util"
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -157,7 +156,7 @@ type ArchiveCard struct {
 	WorldDay int
 	Region string
 	CauseOfDeath string
-	KeySkills []string
+	Skills []string
 	NotableDecisions []string
 	Allies []string
 	FinalInventory json.RawMessage
@@ -275,5 +274,17 @@ func (sr *SettingsRepo) CycleDensity(ctx context.Context, runID uuid.UUID) error
 	return sr.db.gorm.WithContext(ctx).Exec(`UPDATE settings SET text_density = CASE text_density WHEN 'concise' THEN 'standard' WHEN 'standard' THEN 'rich' ELSE 'concise' END WHERE run_id = ?`, runID).Error
 }
 
-// Helper error wrap
-func wrap(err error, msg string) error { if err == nil { return nil }; return errors.Wrap(err, msg) }
+// SurvivorRepo Update method for transactional survivor state persistence.
+func (s *SurvivorRepo) Update(ctx context.Context, tx *gorm.DB, id uuid.UUID, sv engine.Survivor) error {
+	skills, _ := json.Marshal(sv.Skills)
+	stats, _ := json.Marshal(sv.Stats)
+	meters, _ := json.Marshal(sv.Meters)
+	inv, _ := json.Marshal(sv.Inventory)
+	env, _ := json.Marshal(sv.Environment)
+	conds := pqStringArray(sv.Conditions)
+	// choose executor
+	exec := s.db.gorm.WithContext(ctx)
+	if tx != nil { exec = tx.WithContext(ctx) }
+	return exec.Exec(`UPDATE survivors SET skills = ?, stats = ?, body_temp = ?, conditions = ?, meters = ?, inventory = ?, environment = ?, alive = ? WHERE id = ?`,
+		skills, stats, sv.BodyTemp, conds, meters, inv, env, sv.Alive, id).Error
+}

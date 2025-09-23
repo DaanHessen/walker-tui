@@ -3,11 +3,14 @@ package ui
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 
 	"github.com/DaanHessen/walker-tui/internal/engine"
 	"github.com/DaanHessen/walker-tui/internal/store"
@@ -22,35 +25,68 @@ type model struct {
 	narrator text.Narrator
 	md       string
 	styles   struct{ title lipgloss.Style }
-	choices   []engine.Choice
+	choices  []engine.Choice
 	rng      *rand.Rand
+	// persistence
+	db        *store.DB
+	runID     uuid.UUID
+	survivorID uuid.UUID
+	sceneID   uuid.UUID
 }
 
-func initialModel(ctx context.Context, narrator text.Narrator, seed int64) model {
-	w := engine.NewWorld(seed)
-	r := engine.RNG(seed)
-	s := engine.NewFirstSurvivor(r, w.CurrentDay, "origin-region")
-	m := model{ctx: ctx, world: w, survivor: s, narrator: narrator}
+func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg util.Config) model {
+	w := engine.NewWorld(cfg.Seed)
+	r := engine.RNG(cfg.Seed)
+	s := engine.NewFirstSurvivor(r, w.CurrentDay, w.OriginSite)
+	m := model{ctx: ctx, world: w, survivor: s, narrator: narrator, db: db}
 	m.styles.title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	m.rng = engine.RNG(seed)
-	m.choices = engine.GenerateChoices(m.rng, m.survivor)
-	m.generateScene()
+	m.rng = engine.RNG(cfg.Seed)
+	// create run + survivor records then first scene
+	if err := m.bootstrapPersistence(); err != nil {
+		log.Printf("bootstrap error: %v", err)
+	}
 	return m
 }
 
-func (m model) Init() tea.Cmd { return nil }
-
-func (m *model) generateScene() {
-	state := m.survivor.NarrativeState()
-	scene, _ := m.narrator.Scene(m.ctx, state)
-	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
-	out, _ := renderer.Render(scene)
-	m.md = out
-	// append choices list (simple)
-	for _, c := range m.choices {
-		m.md += fmt.Sprintf("\n[%d] %s (Risk: %s)", c.Index+1, c.Label, c.Risk)
-	}
+func (m *model) bootstrapPersistence() error {
+	runRepo := store.NewRunRepo(m.db)
+	survRepo := store.NewSurvivorRepo(m.db)
+	run, err := runRepo.Create(m.ctx, m.world.OriginSite, m.world.Seed)
+	if err != nil { return err }
+	m.runID = run.ID
+	sid, err := survRepo.Create(m.ctx, m.runID, m.survivor)
+	if err != nil { return err }
+	m.survivorID = sid
+	return m.newSceneTx()
 }
+
+func (m *model) newSceneTx() error {
+	return m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
+		// generate choices + scene markdown
+		m.choices = engine.GenerateChoices(m.rng, m.survivor)
+		state := m.survivor.NarrativeState()
+		md, _ := m.narrator.Scene(m.ctx, state)
+		sceneRepo := store.NewSceneRepo(m.db)
+		choiceRepo := store.NewChoiceRepo(m.db)
+		sceneID, err := sceneRepo.Insert(m.ctx, tx, m.runID, m.survivorID, m.world.CurrentDay, "day", m.survivor.Environment.LAD, md)
+		if err != nil { return err }
+		if err := choiceRepo.BulkInsert(m.ctx, tx, sceneID, m.choices); err != nil { return err }
+		m.sceneID = sceneID
+		// render for view including choices list
+		renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
+		out, _ := renderer.Render(md)
+		for _, c := range m.choices {
+			out += fmt.Sprintf("\n[%d] %s (Risk: %s)", c.Index+1, c.Label, c.Risk)
+		}
+		m.md = out
+		return nil
+	})
+}
+
+// generateScene no longer used externally; kept for reference (unused)
+// func (m *model) generateScene() { }
+
+func (m model) Init() tea.Cmd { return nil }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -62,13 +98,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			idx := int(msg.String()[0] - '1')
 			if idx < len(m.choices) {
 				c := m.choices[idx]
-				engine.ApplyChoice(&m.survivor, c)
-				m.choices = engine.GenerateChoices(m.rng, m.survivor)
-				m.generateScene()
+				// apply choice & persist outcome transactionally
+				if err := m.resolveChoiceTx(c); err != nil {
+					log.Printf("turn error: %v", err)
+				}
 			}
 		}
 	}
 	return m, nil
+}
+
+func (m *model) resolveChoiceTx(c engine.Choice) error {
+	return m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
+		// apply mechanical effects first (in-memory)
+		delta := engine.ApplyChoice(&m.survivor, c)
+		updateRepo := store.NewUpdateRepo(m.db)
+		outcomeRepo := store.NewOutcomeRepo(m.db)
+		survRepo := store.NewSurvivorRepo(m.db)
+		if _, err := updateRepo.Insert(m.ctx, tx, m.sceneID, delta, m.survivor.Conditions); err != nil { return err }
+		outMD, _ := m.narrator.Outcome(m.ctx, m.survivor.NarrativeState(), c, delta)
+		if _, err := outcomeRepo.Insert(m.ctx, tx, m.sceneID, outMD); err != nil { return err }
+		if err := survRepo.Update(m.ctx, tx, m.survivorID, m.survivor); err != nil { return err }
+		// if dead create archive card
+		if !m.survivor.Alive {
+			archRepo := store.NewArchiveRepo(m.db)
+			if _, err := archRepo.Insert(m.ctx, tx, m.runID, m.survivorID, m.world.CurrentDay, m.survivor.Region, "unknown", m.survivor.Inventory, "# Archive Card\n(placeholder)"); err != nil { return err }
+		}
+		return nil
+	})
+	// after commit spawn next scene or end
+	if m.survivor.Alive {
+		return m.newSceneTx()
+	}
+	m.md = "Survivor has perished. Run ends (prototype). Press q to quit."
+	return nil
 }
 
 func (m model) View() string {
@@ -77,7 +140,7 @@ func (m model) View() string {
 
 // Run starts the TUI.
 func Run(ctx context.Context, db *store.DB, narrator text.Narrator, cfg util.Config, version string) error {
-	p := tea.NewProgram(initialModel(ctx, narrator, cfg.Seed))
+	p := tea.NewProgram(initialModel(ctx, db, narrator, cfg))
 	_, err := p.Run()
 	return err
 }
