@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"math/rand"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -21,6 +22,8 @@ type model struct {
 	narrator text.Narrator
 	md       string
 	styles   struct{ title lipgloss.Style }
+	choices   []engine.Choice
+	rng      *rand.Rand
 }
 
 func initialModel(ctx context.Context, narrator text.Narrator, seed int64) model {
@@ -29,6 +32,8 @@ func initialModel(ctx context.Context, narrator text.Narrator, seed int64) model
 	s := engine.NewFirstSurvivor(r, w.CurrentDay, "origin-region")
 	m := model{ctx: ctx, world: w, survivor: s, narrator: narrator}
 	m.styles.title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	m.rng = engine.RNG(seed)
+	m.choices = engine.GenerateChoices(m.rng, m.survivor)
 	m.generateScene()
 	return m
 }
@@ -41,12 +46,27 @@ func (m *model) generateScene() {
 	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
 	out, _ := renderer.Render(scene)
 	m.md = out
+	// append choices list (simple)
+	for _, c := range m.choices {
+		m.md += fmt.Sprintf("\n[%d] %s (Risk: %s)", c.Index+1, c.Label, c.Risk)
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "q" { return m, tea.Quit }
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
+			return m, tea.Quit
+		}
+		if len(msg.String()) == 1 && msg.String()[0] >= '1' && msg.String()[0] <= '6' {
+			idx := int(msg.String()[0] - '1')
+			if idx < len(m.choices) {
+				c := m.choices[idx]
+				engine.ApplyChoice(&m.survivor, c)
+				m.choices = engine.GenerateChoices(m.rng, m.survivor)
+				m.generateScene()
+			}
+		}
 	}
 	return m, nil
 }
