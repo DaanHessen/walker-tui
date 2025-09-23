@@ -288,3 +288,20 @@ func (s *SurvivorRepo) Update(ctx context.Context, tx *gorm.DB, id uuid.UUID, sv
 	return exec.Exec(`UPDATE survivors SET skills = ?, stats = ?, body_temp = ?, conditions = ?, meters = ?, inventory = ?, environment = ?, alive = ? WHERE id = ?`,
 		skills, stats, sv.BodyTemp, conds, meters, inv, env, sv.Alive, id).Error
 }
+
+// RunRepo day update
+func (r *RunRepo) UpdateDay(ctx context.Context, tx *gorm.DB, id uuid.UUID, day int) error {
+	exec := r.db.gorm.WithContext(ctx)
+	if tx != nil { exec = tx.WithContext(ctx) }
+	return exec.Exec(`UPDATE runs SET current_day = ? WHERE id = ?`, day, id).Error
+}
+
+// LogRepo insert master log
+func (lr *LogRepo) Insert(ctx context.Context, tx *gorm.DB, runID, survivorID uuid.UUID, summary any, recap string) (uuid.UUID, error) {
+	id := uuid.New()
+	b, _ := json.Marshal(summary)
+	if err := tx.Exec(`INSERT INTO master_logs(id, run_id, survivor_id, choices_summary, narrative_recap) VALUES (?,?,?,?,?)`, id, runID, survivorID, b, recap).Error; err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
+}

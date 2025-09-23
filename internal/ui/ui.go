@@ -32,6 +32,7 @@ type model struct {
 	runID     uuid.UUID
 	survivorID uuid.UUID
 	sceneID   uuid.UUID
+	turn      int
 }
 
 func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg util.Config) model {
@@ -111,18 +112,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) resolveChoiceTx(c engine.Choice) error {
 	var aliveAfter bool
 	var outcomeMD string
+	prevTurn := m.turn
 	// perform transactional persistence of update & outcome
 	err := m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
 		delta := engine.ApplyChoice(&m.survivor, c)
 		updateRepo := store.NewUpdateRepo(m.db)
 		outcomeRepo := store.NewOutcomeRepo(m.db)
 		survRepo := store.NewSurvivorRepo(m.db)
+		logRepo := store.NewLogRepo(m.db)
 		if _, err := updateRepo.Insert(m.ctx, tx, m.sceneID, delta, m.survivor.Conditions); err != nil { return err }
 		outMD, _ := m.narrator.Outcome(m.ctx, m.survivor.NarrativeState(), c, delta)
 		if _, err := outcomeRepo.Insert(m.ctx, tx, m.sceneID, outMD); err != nil { return err }
 		if err := survRepo.Update(m.ctx, tx, m.survivorID, m.survivor); err != nil { return err }
 		outcomeMD = outMD
 		aliveAfter = m.survivor.Alive
+		// simplistic choices summary per turn appended as new master log row
+		_ , _ = logRepo.Insert(m.ctx, tx, m.runID, m.survivorID, map[string]any{"turn": prevTurn, "choice": c.Label, "delta": delta}, "(recap placeholder)")
 		if !aliveAfter { // archive card
 			archRepo := store.NewArchiveRepo(m.db)
 			if _, err := archRepo.Insert(m.ctx, tx, m.runID, m.survivorID, m.world.CurrentDay, m.survivor.Region, "unknown", m.survivor.Inventory, "# Archive Card\n(placeholder)"); err != nil { return err }
@@ -130,6 +135,7 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 		return nil
 	})
 	if err != nil { return err }
+	m.turn++
 	// Post-commit: if dead show final outcome, else proceed to next scene
 	if !aliveAfter {
 		m.md = m.md + "\n\n" + outcomeMD + "\n\nSurvivor has perished. Run ends (prototype). Press q to quit."
