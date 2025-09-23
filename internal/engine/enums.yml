@@ -1,0 +1,72 @@
+# Central enum definitions for Zero Point.
+traits:
+  - cautious
+  - impulsive
+  - stoic
+  - empathetic
+  - pragmatic
+  - paranoid
+  - charismatic
+  - loner
+skills:
+  - combat_melee
+  - firearms
+  - stealth
+  - scavenging
+  - survival
+  - medicine
+  - leadership
+  - technical
+  - crafting
+  - animal_handling
+  - driving
+  - navigation
+conditions:
+  - bleeding
+  - fracture
+  - infection
+  - fever
+  - hypothermia
+  - heatstroke
+  - dehydration
+  - pain
+  - poisoning
+meters:
+  - noise
+  - visibility
+  - scent
+location_types:
+  - city
+  - suburb
+  - rural
+  - forest
+  - coast
+  - mountain
+  - desert
+seasons:
+  - spring
+  - summer
+  - autumn
+  - winter
+weather:
+  - clear
+  - overcast
+  - rain
+  - storm
+  - snow
+  - fog
+temp_bands:
+  - freezing
+  - cold
+  - mild
+  - warm
+  - hot
+risk_levels:
+  - Low
+  - Moderate
+  - High
+group_types:
+  - Solo
+  - Duo
+  - SmallGroup
+  - Community

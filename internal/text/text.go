@@ -2,6 +2,10 @@ package text
 
 import (
 	"context"
+	"fmt"
+	"strings"
+
+	"github.com/DaanHessen/walker-tui/internal/engine"
 )
 
 // Narrator is the interface used by the game to render prose.
@@ -16,10 +20,30 @@ type templateNarrator struct{}
 func NewTemplateNarrator(seed int64) Narrator { return &templateNarrator{} }
 
 func (t *templateNarrator) Scene(ctx context.Context, st any) (string, error) {
-	return "[Template scene placeholder]", nil
+	m, ok := st.(map[string]any)
+	if !ok {
+		return "[invalid scene state]", nil
+	}
+	// Basic markdown scaffold matching required ordering subset.
+	var b strings.Builder
+	b.WriteString("## CHARACTER OVERVIEW\n")
+	b.WriteString(fmt.Sprintf("Name: %v | Day: %v\n\n", m["name"], m["world_day"]))
+	b.WriteString("## SKILLS\n")
+	if skills, ok := m["skills"].(map[engine.Skill]int); ok {
+		for k, v := range skills { b.WriteString(fmt.Sprintf("- %s: %d\n", k, v)) }
+	}
+	b.WriteString("\n## STATS\n")
+	if stats, ok := m["stats"].(engine.Stats); ok {
+		b.WriteString(fmt.Sprintf("Health %d Hunger %d Thirst %d Fatigue %d Morale %d\n", stats.Health, stats.Hunger, stats.Thirst, stats.Fatigue, stats.Morale))
+	}
+	b.WriteString("\n## SCENE\n")
+	b.WriteString("The day begins. (Placeholder narrative)\n")
+	b.WriteString("\n## CHOICES\n")
+	b.WriteString("1. Forage (Cost: time+fatigue, Risk: Low)\n2. Rest (Cost: time, Risk: Low)\n")
+	return b.String(), nil
 }
 func (t *templateNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
-	return "[Template outcome placeholder]", nil
+	return "Outcome: placeholder markdown.", nil
 }
 
 // deepSeekNarrator is a placeholder for the online AI narrator.

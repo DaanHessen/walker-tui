@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 
 	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_migrate "github.com/golang-migrate/migrate/v4/source/file"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
 
 // Migrator handles DB schema migrations using golang-migrate.
@@ -40,11 +40,11 @@ func (m *Migrator) Up(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	mig, closer, err := m.migrateInstance(src)
+	mig, err := migrate.New(src, m.dsn)
 	if err != nil {
 		return err
 	}
-	defer closer()
+	defer mig.Close()
 	if err := mig.Up(); err != nil {
 		if err == migrate.ErrNoChange {
 			return ErrNoChange
@@ -59,11 +59,11 @@ func (m *Migrator) Down(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	mig, closer, err := m.migrateInstance(src)
+	mig, err := migrate.New(src, m.dsn)
 	if err != nil {
 		return err
 	}
-	defer closer()
+	defer mig.Close()
 	if err := mig.Steps(-1); err != nil {
 		if err == migrate.ErrNoChange {
 			return ErrNoChange
@@ -71,17 +71,4 @@ func (m *Migrator) Down(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-func (m *Migrator) migrateInstance(src string) (*migrate.Migrate, func(), error) {
-	_ = _migrate.Asset{} // keep file driver
-	// Ensure postgres driver is linked
-	if _, err := postgres.WithInstance(nil, &postgres.Config{}); err != nil {
-		// ignore actual nil DB error, this is only to link package
-	}
-	mig, err := migrate.New(src, m.dsn)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	return mig, func() { mig.Close() }, nil
 }
