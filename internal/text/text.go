@@ -37,7 +37,10 @@ func (t *templateNarrator) Scene(ctx context.Context, st any) (string, error) {
 		b.WriteString(fmt.Sprintf("Health %d Hunger %d Thirst %d Fatigue %d Morale %d\n", stats.Health, stats.Hunger, stats.Thirst, stats.Fatigue, stats.Morale))
 	}
 	b.WriteString("\n## SCENE\n")
-	b.WriteString("The day begins. (Placeholder narrative)\n")
+	infected := false
+	if v, ok := m["infected_present"].(bool); ok { infected = v }
+	if infected { b.WriteString("Distant shapes move with unnatural jerks at the edge of town. ") } else { b.WriteString("The streets remain eerily untouched by the outbreak's signs. ") }
+	b.WriteString("(Placeholder narrative)\n")
 	b.WriteString("\n## CHOICES\n")
 	b.WriteString("1. Forage (Cost: time+fatigue, Risk: Low)\n2. Rest (Cost: time, Risk: Low)\n")
 	return b.String(), nil
