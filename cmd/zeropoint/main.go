@@ -83,7 +83,7 @@ func main() {
 
 	var narrator text.Narrator
 	if cfg.UseAI {
-		ds, err := text.NewDeepSeekNarrator(os.Getenv("DEEPSEEK_API_KEY"))
+		ds, err := text.NewNarrator(os.Getenv("DEEPSEEK_API_KEY"))
 		if err != nil {
 			log.Printf("DeepSeek disabled: %v", err)
 			narrator = text.NewTemplateNarrator(cfg.Seed)

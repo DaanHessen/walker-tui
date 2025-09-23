@@ -128,6 +128,43 @@ func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor 
 	}
 }
 
+// NewGenericSurvivor generates a replacement survivor (post-first) using broader randomization.
+func NewGenericSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor {
+	traits := []Trait{AllTraits[r.Intn(len(AllTraits))]}
+	for len(traits) < 2 {
+		t := AllTraits[r.Intn(len(AllTraits))]
+		dup := false
+		for _, ex := range traits { if ex == t { dup = true; break } }
+		if !dup { traits = append(traits, t) }
+	}
+	skills := make(map[Skill]int)
+	for _, s := range AllSkills { skills[s] = 0 }
+	groups := []GroupType{GroupSolo, GroupDuo, GroupSmallGroup}
+	g := groups[r.Intn(len(groups))]
+	gSize := 1
+	if g == GroupDuo { gSize = 2 } else if g == GroupSmallGroup { gSize = 3 + r.Intn(3) }
+	locs := []LocationType{LocationCity, LocationSuburb, LocationRural}
+	loc := locs[r.Intn(len(locs))]
+	return Survivor{
+		Name:       randomName(r),
+		Age:        16 + r.Intn(40),
+		Background: "civilian",
+		Region:     originRegion,
+		Location:   loc,
+		Group:      g,
+		GroupSize:  gSize,
+		Traits:     traits,
+		Skills:     skills,
+		Stats:      Stats{Health: 100, Hunger: 40, Thirst: 40, Fatigue: 20, Morale: 55},
+		BodyTemp:   TempMild,
+		Conditions: nil,
+		Meters:     map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0},
+		Inventory:  Inventory{Weapons: nil, Ammo: map[string]int{}, FoodDays: 0.4, WaterLiters: 0.8, Medical: []string{"bandage"}},
+		Environment: Environment{WorldDay: worldDay, TimeOfDay: "morning", Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: 0, Infected: worldDay >= 0},
+		Alive: true,
+	}
+}
+
 func randomName(r *rand.Rand) string {
 	names := []string{"Alex", "Jordan", "Taylor", "Riley", "Morgan", "Casey", "Jamie", "Avery"}
 	return names[r.Intn(len(names))]
