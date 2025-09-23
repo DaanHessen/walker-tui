@@ -109,8 +109,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) resolveChoiceTx(c engine.Choice) error {
-	return m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
-		// apply mechanical effects first (in-memory)
+	var aliveAfter bool
+	var outcomeMD string
+	// perform transactional persistence of update & outcome
+	err := m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
 		delta := engine.ApplyChoice(&m.survivor, c)
 		updateRepo := store.NewUpdateRepo(m.db)
 		outcomeRepo := store.NewOutcomeRepo(m.db)
@@ -119,18 +121,24 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 		outMD, _ := m.narrator.Outcome(m.ctx, m.survivor.NarrativeState(), c, delta)
 		if _, err := outcomeRepo.Insert(m.ctx, tx, m.sceneID, outMD); err != nil { return err }
 		if err := survRepo.Update(m.ctx, tx, m.survivorID, m.survivor); err != nil { return err }
-		// if dead create archive card
-		if !m.survivor.Alive {
+		outcomeMD = outMD
+		aliveAfter = m.survivor.Alive
+		if !aliveAfter { // archive card
 			archRepo := store.NewArchiveRepo(m.db)
 			if _, err := archRepo.Insert(m.ctx, tx, m.runID, m.survivorID, m.world.CurrentDay, m.survivor.Region, "unknown", m.survivor.Inventory, "# Archive Card\n(placeholder)"); err != nil { return err }
 		}
 		return nil
 	})
-	// after commit spawn next scene or end
-	if m.survivor.Alive {
-		return m.newSceneTx()
+	if err != nil { return err }
+	// Post-commit: if dead show final outcome, else proceed to next scene
+	if !aliveAfter {
+		m.md = m.md + "\n\n" + outcomeMD + "\n\nSurvivor has perished. Run ends (prototype). Press q to quit."
+		return nil
 	}
-	m.md = "Survivor has perished. Run ends (prototype). Press q to quit."
+	// alive: generate next scene (persist) and prepend outcome from previous turn for continuity
+	prev := m.md + "\n\n" + outcomeMD + "\n\n--- NEXT ---\n"
+	if err := m.newSceneTx(); err != nil { return err }
+	m.md = prev + m.md
 	return nil
 }
 
