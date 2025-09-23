@@ -60,6 +60,7 @@ type Environment struct {
 	Region      string
 	Location    LocationType
 	LAD         int // Local Arrival Day precomputed for gating
+	Infected    bool // whether infected are now present locally (day >= LAD)
 }
 
 // RNG returns a deterministic rand.Rand for a seed.
@@ -122,7 +123,7 @@ func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor 
 		Conditions: nil,
 		Meters:     map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0},
 		Inventory:  Inventory{Weapons: nil, Ammo: map[string]int{}, FoodDays: 0.5, WaterLiters: 1.0, Medical: []string{"bandage"}, Tools: []string{"pocket knife"}},
-		Environment: Environment{WorldDay: worldDay, TimeOfDay: "morning", Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: LocationSuburb, LAD: 0},
+		Environment: Environment{WorldDay: worldDay, TimeOfDay: "morning", Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: LocationSuburb, LAD: 0, Infected: worldDay >= 0},
 		Alive: true,
 	}
 }
@@ -190,9 +191,20 @@ func (s Survivor) NarrativeState() map[string]any {
 		"region": s.Region,
 		"world_day": s.Environment.WorldDay,
 		"lad": s.Environment.LAD,
+		"infected_present": s.Environment.Infected,
 		"conditions": s.Conditions,
 	}
 }
 
 // SeedTime returns deterministic time for run day.
 func SeedTime(seed int64, day int) time.Time { return time.Unix(seed, 0).Add(time.Duration(day) * 24 * time.Hour) }
+
+// SyncEnvironmentDay updates the environment's world day and infection presence.
+func (s *Survivor) SyncEnvironmentDay(day int) {
+	s.Environment.WorldDay = day
+	s.updateInfectionPresence()
+}
+
+func (s *Survivor) updateInfectionPresence() {
+	s.Environment.Infected = s.Environment.WorldDay >= s.Environment.LAD
+}
