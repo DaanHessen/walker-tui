@@ -15,31 +15,31 @@ type RiskLevel string
 type GroupType string
 
 const (
-	TraitCautious   Trait = "cautious"
-	TraitImpulsive  Trait = "impulsive"
-	TraitStoic      Trait = "stoic"
-	TraitEmpathetic Trait = "empathetic"
-	TraitPragmatic  Trait = "pragmatic"
-	TraitParanoid   Trait = "paranoid"
+	TraitCautious    Trait = "cautious"
+	TraitImpulsive   Trait = "impulsive"
+	TraitStoic       Trait = "stoic"
+	TraitEmpathetic  Trait = "empathetic"
+	TraitPragmatic   Trait = "pragmatic"
+	TraitParanoid    Trait = "paranoid"
 	TraitCharismatic Trait = "charismatic"
-	TraitLoner      Trait = "loner"
+	TraitLoner       Trait = "loner"
 )
 
 var AllTraits = []Trait{TraitCautious, TraitImpulsive, TraitStoic, TraitEmpathetic, TraitPragmatic, TraitParanoid, TraitCharismatic, TraitLoner}
 
 const (
-	SkillCombatMelee   Skill = "combat_melee"
-	SkillFirearms      Skill = "firearms"
-	SkillStealth       Skill = "stealth"
-	SkillScavenging    Skill = "scavenging"
-	SkillSurvival      Skill = "survival"
-	SkillMedicine      Skill = "medicine"
-	SkillLeadership    Skill = "leadership"
-	SkillTechnical     Skill = "technical"
-	SkillCrafting      Skill = "crafting"
+	SkillCombatMelee    Skill = "combat_melee"
+	SkillFirearms       Skill = "firearms"
+	SkillStealth        Skill = "stealth"
+	SkillScavenging     Skill = "scavenging"
+	SkillSurvival       Skill = "survival"
+	SkillMedicine       Skill = "medicine"
+	SkillLeadership     Skill = "leadership"
+	SkillTechnical      Skill = "technical"
+	SkillCrafting       Skill = "crafting"
 	SkillAnimalHandling Skill = "animal_handling"
-	SkillDriving       Skill = "driving"
-	SkillNavigation    Skill = "navigation"
+	SkillDriving        Skill = "driving"
+	SkillNavigation     Skill = "navigation"
 )
 
 var AllSkills = []Skill{SkillCombatMelee, SkillFirearms, SkillStealth, SkillScavenging, SkillSurvival, SkillMedicine, SkillLeadership, SkillTechnical, SkillCrafting, SkillAnimalHandling, SkillDriving, SkillNavigation}
@@ -135,25 +135,25 @@ func contains[T ~string](list []T, v T) bool {
 	return false
 }
 
-func (t Trait) Validate() bool            { return contains(AllTraits, t) }
-func (s Skill) Validate() bool            { return contains(AllSkills, s) }
-func (c Condition) Validate() bool        { return contains(AllConditions, c) }
-func (m Meter) Validate() bool            { return contains(AllMeters, m) }
-func (l LocationType) Validate() bool     { return contains(AllLocationTypes, l) }
-func (s Season) Validate() bool           { return contains(AllSeasons, s) }
-func (w Weather) Validate() bool          { return contains(AllWeather, w) }
-func (t TempBand) Validate() bool         { return contains(AllTempBands, t) }
-func (r RiskLevel) Validate() bool        { return contains(AllRiskLevels, r) }
-func (g GroupType) Validate() bool        { return contains(AllGroupTypes, g) }
+func (t Trait) Validate() bool        { return contains(AllTraits, t) }
+func (s Skill) Validate() bool        { return contains(AllSkills, s) }
+func (c Condition) Validate() bool    { return contains(AllConditions, c) }
+func (m Meter) Validate() bool        { return contains(AllMeters, m) }
+func (l LocationType) Validate() bool { return contains(AllLocationTypes, l) }
+func (s Season) Validate() bool       { return contains(AllSeasons, s) }
+func (w Weather) Validate() bool      { return contains(AllWeather, w) }
+func (t TempBand) Validate() bool     { return contains(AllTempBands, t) }
+func (r RiskLevel) Validate() bool    { return contains(AllRiskLevels, r) }
+func (g GroupType) Validate() bool    { return contains(AllGroupTypes, g) }
 
 // List helpers
-func ListTraits() []Trait                 { return append([]Trait{}, AllTraits...) }
-func ListSkills() []Skill                 { return append([]Skill{}, AllSkills...) }
-func ListConditions() []Condition         { return append([]Condition{}, AllConditions...) }
-func ListMeters() []Meter                 { return append([]Meter{}, AllMeters...) }
-func ListLocationTypes() []LocationType   { return append([]LocationType{}, AllLocationTypes...) }
-func ListSeasons() []Season               { return append([]Season{}, AllSeasons...) }
-func ListWeather() []Weather              { return append([]Weather{}, AllWeather...) }
-func ListTempBands() []TempBand           { return append([]TempBand{}, AllTempBands...) }
-func ListRiskLevels() []RiskLevel         { return append([]RiskLevel{}, AllRiskLevels...) }
-func ListGroupTypes() []GroupType         { return append([]GroupType{}, AllGroupTypes...) }
+func ListTraits() []Trait               { return append([]Trait{}, AllTraits...) }
+func ListSkills() []Skill               { return append([]Skill{}, AllSkills...) }
+func ListConditions() []Condition       { return append([]Condition{}, AllConditions...) }
+func ListMeters() []Meter               { return append([]Meter{}, AllMeters...) }
+func ListLocationTypes() []LocationType { return append([]LocationType{}, AllLocationTypes...) }
+func ListSeasons() []Season             { return append([]Season{}, AllSeasons...) }
+func ListWeather() []Weather            { return append([]Weather{}, AllWeather...) }
+func ListTempBands() []TempBand         { return append([]TempBand{}, AllTempBands...) }
+func ListRiskLevels() []RiskLevel       { return append([]RiskLevel{}, AllRiskLevels...) }
+func ListGroupTypes() []GroupType       { return append([]GroupType{}, AllGroupTypes...) }

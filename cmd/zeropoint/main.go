@@ -23,24 +23,25 @@ func main() {
 	seed := flag.Int64("seed", time.Now().UnixNano(), "RNG seed")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL DSN")
 	density := flag.String("density", "standard", "Text density: concise|standard|rich")
-	noAI := flag.Bool("no-ai", false, "Disable DeepSeek narration and use template narrator")
+	noAI := flag.Bool("no-ai", false, "Disable DeepSeek narration (force minimal fallback)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "zeropoint [--seed N] [--dsn DSN] [--density=concise|standard|rich] [--no-ai] | migrate up|down | version\n")
+		fmt.Fprintf(os.Stderr, "walker-tui [--seed N] [--dsn DSN] [--density=concise|standard|rich] [--no-ai] | migrate up|down | version\n")
 	}
 	flag.Parse()
+
+	if *dsn == "" {
+		*dsn = "postgres://dev:dev@localhost:5432/zeropoint?sslmode=disable"
+	}
 
 	args := flag.Args()
 	if len(args) > 0 {
 		switch args[0] {
 		case "version":
-			fmt.Println("zeropoint", version)
+			fmt.Println("walker-tui", version)
 			return
 		case "migrate":
 			if len(args) < 2 {
 				log.Fatal("migrate requires 'up' or 'down'")
-			}
-			if *dsn == "" {
-				log.Fatal("Missing DSN; set --dsn or DATABASE_URL")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -71,6 +72,7 @@ func main() {
 		DSN:         *dsn,
 		TextDensity: *density,
 		UseAI:       !*noAI && os.Getenv("DEEPSEEK_API_KEY") != "",
+		DebugLAD:    os.Getenv("ZEROPOINT_DEBUG_LAD") == "1",
 	}
 
 	ctx := context.Background()
@@ -82,16 +84,17 @@ func main() {
 	defer db.Close()
 
 	var narrator text.Narrator
+	fallback := text.NewMinimalFallbackNarrator()
 	if cfg.UseAI {
-		ds, err := text.NewNarrator(os.Getenv("DEEPSEEK_API_KEY"))
+		ds, err := text.NewDeepSeekNarrator(os.Getenv("DEEPSEEK_API_KEY"))
 		if err != nil {
 			log.Printf("DeepSeek disabled: %v", err)
-			narrator = text.NewTemplateNarrator(cfg.Seed)
+			narrator = fallback
 		} else {
-			narrator = text.WithFallback(ds, text.NewTemplateNarrator(cfg.Seed))
+			narrator = text.WithFallback(ds, fallback)
 		}
 	} else {
-		narrator = text.NewTemplateNarrator(cfg.Seed)
+		narrator = fallback
 	}
 
 	if err := ui.Run(ctx, db, narrator, cfg, version); err != nil {

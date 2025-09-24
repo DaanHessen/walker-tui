@@ -6,4 +6,5 @@ type Config struct {
 	DSN         string
 	TextDensity string // concise|standard|rich
 	UseAI       bool
+	DebugLAD    bool // enabled via ZEROPOINT_DEBUG_LAD env or runtime toggle (F6)
 }
