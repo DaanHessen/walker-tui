@@ -29,7 +29,12 @@ func NewMinimalFallbackNarrator() Narrator { return &MinimalFallbackNarrator{} }
 func (m *MinimalFallbackNarrator) Scene(ctx context.Context, st any) (string, error) {
 	state, _ := st.(map[string]any)
 	var parts []string
-	grab := func(k string) string { if v, ok := state[k]; ok { return fmt.Sprintf("%v", v) }; return "" }
+	grab := func(k string) string {
+		if v, ok := state[k]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+		return ""
+	}
 	region := grab("region")
 	tod := grab("time_of_day")
 	weather := grab("weather")
@@ -71,25 +76,39 @@ func (m *MinimalFallbackNarrator) Outcome(ctx context.Context, st any, ch any, u
 		segs = append(segs, "You take a minor hit to your well-being.")
 	}
 	if delta.Morale != 0 {
-		if delta.Morale > 0 { segs = append(segs, "Your resolve steadies a little.") } else { segs = append(segs, "Your mood dips.") }
+		if delta.Morale > 0 {
+			segs = append(segs, "Your resolve steadies a little.")
+		} else {
+			segs = append(segs, "Your mood dips.")
+		}
 	}
 	segs = append(segs, "You reassess your immediate options.")
 	return strings.Join(segs, " "), nil
 }
 
 // Fallback wrapper.
-func WithFallback(primary, fallback Narrator) Narrator { return &fallbackNarrator{p: primary, f: fallback} }
+func WithFallback(primary, fallback Narrator) Narrator {
+	return &fallbackNarrator{p: primary, f: fallback}
+}
 
 type fallbackNarrator struct{ p, f Narrator }
 
 func (n *fallbackNarrator) Scene(ctx context.Context, st any) (string, error) {
-	if n.p == nil { return n.f.Scene(ctx, st) }
-	if s, err := n.p.Scene(ctx, st); err == nil { return s, nil }
+	if n.p == nil {
+		return n.f.Scene(ctx, st)
+	}
+	if s, err := n.p.Scene(ctx, st); err == nil {
+		return s, nil
+	}
 	return n.f.Scene(ctx, st)
 }
 func (n *fallbackNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
-	if n.p == nil { return n.f.Outcome(ctx, st, ch, up) }
-	if s, err := n.p.Outcome(ctx, st, ch, up); err == nil { return s, nil }
+	if n.p == nil {
+		return n.f.Outcome(ctx, st, ch, up)
+	}
+	if s, err := n.p.Outcome(ctx, st, ch, up); err == nil {
+		return s, nil
+	}
 	return n.f.Outcome(ctx, st, ch, up)
 }
 
@@ -100,26 +119,38 @@ type deepSeekNarrator struct {
 }
 
 func NewDeepSeekNarrator(apiKey string) (Narrator, error) {
-	if apiKey == "" { return nil, errors.New("missing api key") }
+	if apiKey == "" {
+		return nil, errors.New("missing api key")
+	}
 	return &deepSeekNarrator{apiKey: apiKey, client: &http.Client{Timeout: 2 * time.Second}}, nil
 }
 
 var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 var ctrlRegexp = regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
 
-func (d *deepSeekNarrator) Scene(ctx context.Context, st any) (string, error) { return d.call(ctx, st, nil, nil, true) }
-func (d *deepSeekNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) { return d.call(ctx, st, ch, up, false) }
+func (d *deepSeekNarrator) Scene(ctx context.Context, st any) (string, error) {
+	return d.call(ctx, st, nil, nil, true)
+}
+func (d *deepSeekNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
+	return d.call(ctx, st, ch, up, false)
+}
 
 // call constructs prompts per spec.
 func (d *deepSeekNarrator) call(ctx context.Context, st any, ch any, up any, isScene bool) (string, error) {
 	cleanState := sanitizeState(st)
+	// inject context hint for timezone/local time if present
+	if tz, ok := cleanState["timezone"].(string); ok {
+		if ldt, ok2 := cleanState["local_datetime"].(string); ok2 {
+			cleanState["context_hint"] = fmt.Sprintf("Local time %s (%s)", ldt, tz)
+		}
+	}
 	stateJSON, _ := json.Marshal(cleanState)
 	var userJSON bytes.Buffer
 	userJSON.Write(stateJSON)
 	var messages []dsMessage
 	if isScene {
 		messages = []dsMessage{
-			{Role: "system", Content: "You are the narrator for a grounded survival TUI game. Write a single **120–250 word** paragraph in **second person, present tense**, strictly from the survivor's current perspective. **No meta, no rules, no statistics, no odds, no headings or lists.** Do not invent items, skills, or conditions. Respect that **open-area infected are not present if the given LAD has not been reached**. Maintain realism and sensory detail."},
+			{Role: "system", Content: "You are the narrator for a grounded survival TUI game. Write a single **120–250 word** paragraph in **second person, present tense**, strictly from the survivor's current perspective. **No meta, no rules, no statistics, no odds, no headings or lists.** Do not invent items, skills, or conditions. Respect that **open-area infected are not present if the given LAD has not been reached**. Maintain realism, subtle tension, and sensory detail. If context_hint is present you may reflect ambient time cues subtly."},
 			{Role: "user", Content: userJSON.String()},
 		}
 	} else {
@@ -127,18 +158,30 @@ func (d *deepSeekNarrator) call(ctx context.Context, st any, ch any, up any, isS
 		deltaJSON, _ := json.Marshal(up)
 		combined := fmt.Sprintf("{\n\"state\": %s,\n\"choice\": %s,\n\"update\": %s\n}", userJSON.String(), string(choiceJSON), string(deltaJSON))
 		messages = []dsMessage{
-			{Role: "system", Content: "Write a single **100–200 word** paragraph in second person, present tense, strictly from the survivor's perspective. Describe only the immediate consequences of the chosen action. **No meta, no rules, no statistics, no odds, no headings or lists.** Do not invent items or mechanics. Subtly reflect the provided UPDATE deltas. Obey the LAD gate."},
+			{Role: "system", Content: "Write a single **100–200 word** paragraph in second person, present tense, strictly from the survivor's perspective. Describe only the immediate consequences of the chosen action. **No meta, no rules, no statistics, no odds, no headings or lists.** Do not invent items or mechanics. Subtly reflect the provided UPDATE deltas. Obey the LAD gate. If context_hint is present optionally hint at time-of-day without stating exact numbers."},
 			{Role: "user", Content: combined},
 		}
 	}
 	reqBody, _ := json.Marshal(dsRequest{Model: "deepseek-reasoner", Messages: messages})
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		select { case <-ctx.Done(): return "", ctx.Err(); default: }
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
 		resp, err := d.doRequest(ctx, reqBody)
-		if err != nil { lastErr = err; backoff(attempt); continue }
+		if err != nil {
+			lastErr = err
+			backoff(attempt)
+			continue
+		}
 		text := sanitizeOutput(resp)
-		if !validateNarrative(text, isScene) { lastErr = errors.New("validation failed"); backoff(attempt); continue }
+		if !validateNarrative(text, isScene, cleanState) {
+			lastErr = errors.New("validation failed")
+			backoff(attempt)
+			continue
+		}
 		return text, nil
 	}
 	return "", lastErr
@@ -146,36 +189,80 @@ func (d *deepSeekNarrator) call(ctx context.Context, st any, ch any, up any, isS
 
 // HTTP + response structs
 
-type dsMessage struct { Role string `json:"role"`; Content string `json:"content"` }
-type dsRequest struct { Model string `json:"model"`; Messages []dsMessage `json:"messages"`; MaxTokens int `json:"max_tokens,omitempty"` }
-type dsChoice struct { Message struct { Role string `json:"role"`; Content string `json:"content"` } `json:"message"` }
-type dsResponse struct { Choices []dsChoice `json:"choices"` }
+type dsMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+type dsRequest struct {
+	Model     string      `json:"model"`
+	Messages  []dsMessage `json:"messages"`
+	MaxTokens int         `json:"max_tokens,omitempty"`
+}
+type dsChoice struct {
+	Message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"message"`
+}
+type dsResponse struct {
+	Choices []dsChoice `json:"choices"`
+}
 
 func (d *deepSeekNarrator) doRequest(ctx context.Context, body []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.deepseek.com/v1/chat/completions", bytes.NewReader(body))
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	req.Header.Set("Authorization", "Bearer "+d.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.client.Do(req)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 { return "", fmt.Errorf("deepseek status %d", resp.StatusCode) }
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("deepseek status %d", resp.StatusCode)
+	}
 	var dr dsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil { return "", err }
-	if len(dr.Choices) == 0 { return "", errors.New("no choices") }
+	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
+		return "", err
+	}
+	if len(dr.Choices) == 0 {
+		return "", errors.New("no choices")
+	}
 	return dr.Choices[0].Message.Content, nil
 }
 
 // Validation ---------------------------------------------------------
-func validateNarrative(s string, isScene bool) bool {
+func validateNarrative(s string, isScene bool, st map[string]any) bool {
 	wc := wordCount(s)
 	if isScene {
-		if wc < 120 || wc > 250 { return false }
+		if wc < 120 || wc > 250 {
+			return false
+		}
 	} else {
-		if wc < 100 || wc > 200 { return false }
+		if wc < 100 || wc > 200 {
+			return false
+		}
 	}
-	if strings.Contains(s, "\n-") || strings.Contains(s, "\n*") { return false }
-	if strings.Contains(strings.ToLower(s), "stat") { return false }
+	ls := strings.ToLower(s)
+	if strings.Contains(ls, "\n-") || strings.Contains(ls, "\n*") {
+		return false
+	}
+	if strings.Contains(ls, "stat ") || strings.Contains(ls, "stats") {
+		return false
+	}
+	infectedPresent := false
+	if v, ok := st["infected_present"]; ok {
+		infectedPresent = v == true || strings.EqualFold(fmt.Sprintf("%v", v), "true")
+	}
+	if !infectedPresent {
+		for _, banned := range []string{"infected", "zombie", "horde"} {
+			if strings.Contains(ls, banned) {
+				return false
+			}
+		}
+	}
 	return true
 }
 
@@ -189,13 +276,28 @@ func sanitizeOutput(s string) string {
 }
 
 func sanitizeState(st any) map[string]any {
-	m, ok := st.(map[string]any); if !ok { return map[string]any{"error":"bad_state"} }
+	m, ok := st.(map[string]any)
+	if !ok {
+		return map[string]any{"error": "bad_state"}
+	}
 	clean := make(map[string]any, len(m))
-	for k,v := range m { clean[k]=v }
+	for k, v := range m {
+		clean[k] = v
+	}
 	return clean
 }
 
 func backoff(attempt int) { time.Sleep(time.Duration(200+attempt*250) * time.Millisecond) }
 
 // Utility deterministic sampling (used by fallback maybe later)
-func sample[T any](r *rand.Rand, in []T, n int) []T { if n>len(in){n=len(in)}; out:=make([]T,0,n); perm:=r.Perm(len(in)); for i:=0;i<n;i++{out=append(out,in[perm[i]])}; return out }
+func sample[T any](r *rand.Rand, in []T, n int) []T {
+	if n > len(in) {
+		n = len(in)
+	}
+	out := make([]T, 0, n)
+	perm := r.Perm(len(in))
+	for i := 0; i < n; i++ {
+		out = append(out, in[perm[i]])
+	}
+	return out
+}

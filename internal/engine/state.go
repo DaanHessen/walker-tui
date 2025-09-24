@@ -59,8 +59,9 @@ type Environment struct {
 	TempBand  TempBand
 	Region    string
 	Location  LocationType
-	LAD       int  // Local Arrival Day precomputed for gating
-	Infected  bool // whether infected are now present locally (day >= LAD)
+	LAD       int
+	Infected  bool
+	Timezone  string // IANA timezone identifier
 }
 
 // RNG returns a deterministic rand.Rand for a seed.
@@ -187,19 +188,16 @@ func randomName(r *rand.Rand) string {
 func randomSurname(r *rand.Rand) string { return surnames[r.Intn(len(surnames))] }
 
 // NewFirstSurvivor generates the initial survivor per first-run rule.
+// Implements probability 5% researcher pre-outbreak (Day -9..0) inside facility; otherwise day 0 near origin (<=100km) LAD=0.
 func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor {
+	// Researcher path decision (5%). If chosen, worldDay random -9..0 and location forced city (facility interior concept), LAD=0 but infected not present until day 0.
+	researcher := r.Float64() < 0.05
+	if researcher {
+		worldDay = -9 + r.Intn(10) // -9..0
+	}
 	traits := []Trait{AllTraits[r.Intn(len(AllTraits))]}
-	// Ensure at least 2 traits distinct
-	for len(traits) < 2 {
-		t := AllTraits[r.Intn(len(AllTraits))]
-		dup := false
-		for _, ex := range traits {
-			if ex == t {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+	for len(traits) < 2 { // ensure two distinct traits
+		if t := AllTraits[r.Intn(len(AllTraits))]; t != traits[0] {
 			traits = append(traits, t)
 		}
 	}
@@ -208,12 +206,23 @@ func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor 
 		skills[s] = 0
 	}
 	loc := LocationSuburb
-	lad := deriveInitialLAD(r, originRegion, loc, r.Int63())
+	if researcher {
+		loc = LocationCity
+	}
+	// First survivor distance <=100km => Tier A LAD=0
+	lad := 0
 	prof := pickProfession(r)
 	inv := Inventory{Weapons: nil, Ammo: map[string]int{}, FoodDays: 0.5, WaterLiters: 1.0, Medical: []string{"bandage"}, Tools: []string{"pocket knife"}}
 	prof.InventoryFn(&inv)
+	// Researcher inventory slight variant (lab badge instead of pocket knife replacement)
+	if researcher {
+		inv.Tools = []string{"lab badge"}
+	}
 	stats := Stats{Health: randIn(r, prof.HealthRange), Hunger: randIn(r, prof.HungerRange), Thirst: randIn(r, prof.ThirstRange), Fatigue: randIn(r, prof.FatigueRange), Morale: randIn(r, prof.MoraleRange)}
 	fullName := randomName(r) + " " + randomSurname(r)
+	// Timezone placeholder: derive deterministic from seed via list (simplified until geo mapping added)
+	zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago"}
+	zone := zones[r.Intn(len(zones))]
 	return Survivor{
 		Name:        fullName,
 		Age:         18 + r.Intn(38),
@@ -227,26 +236,24 @@ func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor 
 		Stats:       stats,
 		BodyTemp:    TempMild,
 		Conditions:  nil,
-		Meters:      map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0},
+		Meters:      map[Meter]int{MeterNoise:0,MeterVisibility:0,MeterScent:0,MeterThirstStreak:0,MeterColdExposure:0,MeterFeverRest:0,MeterWarmStreak:0,MeterExhaustionScenes:0,MeterCustomLastTurn:-10},
 		Inventory:   inv,
-		Environment: Environment{WorldDay: worldDay, TimeOfDay: "morning", Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad},
+		Environment: Environment{WorldDay: worldDay, TimeOfDay: initialTOD(r), Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad, Timezone: zone},
 		Alive:       true,
 	}
+}
+
+// initialTOD returns a simple time-of-day bucket.
+func initialTOD(r *rand.Rand) string {
+	segments := []string{"pre-dawn", "morning", "midday", "afternoon", "evening", "night"}
+	return segments[r.Intn(len(segments))]
 }
 
 // NewGenericSurvivor generates a replacement survivor (post-first) using broader randomization.
 func NewGenericSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor {
 	traits := []Trait{AllTraits[r.Intn(len(AllTraits))]}
 	for len(traits) < 2 {
-		t := AllTraits[r.Intn(len(AllTraits))]
-		dup := false
-		for _, ex := range traits {
-			if ex == t {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+		if t := AllTraits[r.Intn(len(AllTraits))]; t != traits[0] {
 			traits = append(traits, t)
 		}
 	}
@@ -270,23 +277,12 @@ func NewGenericSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivo
 	prof.InventoryFn(&inv)
 	stats := Stats{Health: randIn(r, prof.HealthRange), Hunger: randIn(r, prof.HungerRange), Thirst: randIn(r, prof.ThirstRange), Fatigue: randIn(r, prof.FatigueRange), Morale: randIn(r, prof.MoraleRange)}
 	fullName := randomName(r) + " " + randomSurname(r)
+	zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago", "Australia/Sydney"}
+	zone := zones[r.Intn(len(zones))]
 	return Survivor{
-		Name:        fullName,
-		Age:         16 + r.Intn(40),
-		Background:  prof.Name,
-		Region:      originRegion,
-		Location:    loc,
-		Group:       g,
-		GroupSize:   gSize,
-		Traits:      traits,
-		Skills:      skills,
-		Stats:       stats,
-		BodyTemp:    TempMild,
-		Conditions:  nil,
-		Meters:      map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0},
-		Inventory:   inv,
-		Environment: Environment{WorldDay: worldDay, TimeOfDay: "morning", Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad},
-		Alive:       true,
+		Name: fullName, Age: 16 + r.Intn(40), Background: prof.Name, Region: originRegion, Location: loc, Group: g, GroupSize: gSize,
+		Traits: traits, Skills: skills, Stats: stats, BodyTemp: TempMild, Conditions: nil, Meters: map[Meter]int{MeterNoise:0,MeterVisibility:0,MeterScent:0,MeterThirstStreak:0,MeterColdExposure:0,MeterFeverRest:0,MeterWarmStreak:0,MeterExhaustionScenes:0,MeterCustomLastTurn:-10}, Inventory: inv,
+		Environment: Environment{WorldDay: worldDay, TimeOfDay: initialTOD(r), Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad, Timezone: zone}, Alive: true,
 	}
 }
 
@@ -361,7 +357,34 @@ func (s Survivor) NarrativeState() map[string]any {
 		"time_of_day":      s.Environment.TimeOfDay,
 		"season":           s.Environment.Season,
 		"weather":          s.Environment.Weather,
+		"timezone":         s.Environment.Timezone,
+		"local_datetime":   narrativeLocalTime(s),
 	}
+}
+
+func narrativeLocalTime(s Survivor) string {
+	// Base reference date (arbitrary stable) 2025-03-01 08:00 UTC
+	base := time.Date(2025, 3, 1, 8, 0, 0, 0, time.UTC).Add(time.Duration(s.Environment.WorldDay) * 24 * time.Hour)
+	// Adjust hour by time-of-day bucket
+	switch s.Environment.TimeOfDay {
+	case "pre-dawn":
+		base = time.Date(base.Year(), base.Month(), base.Day(), 4, 30, 0, 0, time.UTC)
+	case "morning":
+		base = time.Date(base.Year(), base.Month(), base.Day(), 9, 0, 0, 0, time.UTC)
+	case "midday":
+		base = time.Date(base.Year(), base.Month(), base.Day(), 12, 30, 0, 0, time.UTC)
+	case "afternoon":
+		base = time.Date(base.Year(), base.Month(), base.Day(), 15, 30, 0, 0, time.UTC)
+	case "evening":
+		base = time.Date(base.Year(), base.Month(), base.Day(), 19, 0, 0, 0, time.UTC)
+	case "night":
+		base = time.Date(base.Year(), base.Month(), base.Day(), 22, 30, 0, 0, time.UTC)
+	}
+	loc, err := time.LoadLocation(s.Environment.Timezone)
+	if err != nil {
+		return base.Format(time.RFC3339)
+	}
+	return base.In(loc).Format(time.RFC3339)
 }
 
 // SeedTime returns deterministic time for run day.
@@ -377,4 +400,34 @@ func (s *Survivor) SyncEnvironmentDay(day int) {
 
 func (s *Survivor) updateInfectionPresence() {
 	s.Environment.Infected = s.Environment.WorldDay >= s.Environment.LAD
+}
+
+// clampSkill restricts skill values to the range 0-5.
+func clampSkill(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 5 {
+		return 5
+	}
+	return v
+}
+
+// NormalizeSkills ensures all skills are within the 0-5 range.
+func NormalizeSkills(sk map[Skill]int) {
+	for k, v := range sk {
+		sk[k] = clampSkill(v)
+	}
+}
+
+// Survivor skill advancement logic.
+
+func (s *Survivor) GainSkill(sk Skill, meaningful bool) {
+	if !meaningful {
+		return
+	}
+	cur := s.Skills[sk]
+	if cur < 5 {
+		s.Skills[sk] = cur + 1
+	}
 }

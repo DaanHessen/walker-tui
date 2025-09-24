@@ -220,6 +220,16 @@ func (r *RunRepo) Get(ctx context.Context, id uuid.UUID) (Run, error) {
 	return rr, nil
 }
 
+// GetLatestRun returns most recently created run (by created_at) – assuming created_at exists.
+func (r *RunRepo) GetLatestRun(ctx context.Context) (Run, error) {
+	row := r.db.gorm.WithContext(ctx).Raw(`SELECT id, origin_site, seed, current_day FROM runs ORDER BY created_at DESC LIMIT 1`).Row()
+	var rr Run
+	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.Seed, &rr.CurrentDay); err != nil {
+		return Run{}, err
+	}
+	return rr, nil
+}
+
 // SurvivorRepo additions
 func (s *SurvivorRepo) Get(ctx context.Context, id uuid.UUID) (engine.Survivor, error) {
 	row := s.db.gorm.Raw(`SELECT name, age, background, region, location_type, group_type, group_size, traits, skills, stats, body_temp, conditions, meters, inventory, environment, alive FROM survivors WHERE id = ?`, id).Row()
@@ -235,6 +245,42 @@ func (s *SurvivorRepo) Get(ctx context.Context, id uuid.UUID) (engine.Survivor, 
 	}
 	// Minimal unmarshal for now (omitted for brevity) – return placeholder.
 	return engine.Survivor{Name: name, Age: age, Background: background, Region: region, Location: engine.LocationType(locationType), Group: engine.GroupType(groupType), GroupSize: groupSize, Alive: alive}, nil
+}
+
+// GetAliveSurvivor returns latest alive survivor for run (simple max updated_at ordering).
+func (s *SurvivorRepo) GetAliveSurvivor(ctx context.Context, runID uuid.UUID) (engine.Survivor, uuid.UUID, error) {
+	row := s.db.gorm.WithContext(ctx).Raw(`SELECT id, name, age, background, region, location_type, group_type, group_size, traits, skills, stats, body_temp, conditions, meters, inventory, environment, alive FROM survivors WHERE run_id = ? AND alive = TRUE ORDER BY updated_at DESC LIMIT 1`, runID).Row()
+	var (
+		id                                                          uuid.UUID
+		name, background, region, locationType, groupType, bodyTemp string
+		age, groupSize                                              int
+		traitsArr, condsArr                                         []string
+		skillsB, statsB, metersB, invB, envB                        []byte
+		alive                                                       bool
+	)
+	if err := row.Scan(&id, &name, &age, &background, &region, &locationType, &groupType, &groupSize, pq.Array(&traitsArr), &skillsB, &statsB, &bodyTemp, pq.Array(&condsArr), &metersB, &invB, &envB, &alive); err != nil {
+		return engine.Survivor{}, uuid.Nil, err
+	}
+	var skills map[engine.Skill]int
+	_ = json.Unmarshal(skillsB, &skills)
+	var stats engine.Stats
+	_ = json.Unmarshal(statsB, &stats)
+	var meters map[engine.Meter]int
+	_ = json.Unmarshal(metersB, &meters)
+	var inv engine.Inventory
+	_ = json.Unmarshal(invB, &inv)
+	var env engine.Environment
+	_ = json.Unmarshal(envB, &env)
+	traits := make([]engine.Trait, len(traitsArr))
+	for i, t := range traitsArr {
+		traits[i] = engine.Trait(t)
+	}
+	conds := make([]engine.Condition, len(condsArr))
+	for i, c := range condsArr {
+		conds[i] = engine.Condition(c)
+	}
+	surv := engine.Survivor{Name: name, Age: age, Background: background, Region: region, Location: engine.LocationType(locationType), Group: engine.GroupType(groupType), GroupSize: groupSize, Traits: traits, Skills: skills, Stats: stats, BodyTemp: engine.TempBand(bodyTemp), Conditions: conds, Meters: meters, Inventory: inv, Environment: env, Alive: alive}
+	return surv, id, nil
 }
 
 // SceneRepo persistence
@@ -316,22 +362,34 @@ func (ar *ArchiveRepo) List(ctx context.Context, runID uuid.UUID, limit int) ([]
 type SettingsRepo struct{ db *DB }
 
 func NewSettingsRepo(db *DB) *SettingsRepo { return &SettingsRepo{db: db} }
-func (sr *SettingsRepo) Upsert(ctx context.Context, runID uuid.UUID, scarcity bool, density, language, narrator string) error {
-	return sr.db.gorm.WithContext(ctx).Exec(`INSERT INTO settings(run_id, scarcity, text_density, language, narrator) VALUES (?,?,?,?,?)
-	ON CONFLICT (run_id) DO UPDATE SET scarcity=EXCLUDED.scarcity, text_density=EXCLUDED.text_density, language=EXCLUDED.language, narrator=EXCLUDED.narrator`, runID, scarcity, density, language, narrator).Error
+func (sr *SettingsRepo) Upsert(ctx context.Context, runID uuid.UUID, scarcity bool, density, language, narrator string, difficulty string) error {
+	return sr.db.gorm.WithContext(ctx).Exec(`INSERT INTO settings(run_id, scarcity, text_density, language, narrator, difficulty) VALUES (?,?,?,?,?,?)
+	ON CONFLICT (run_id) DO UPDATE SET scarcity=EXCLUDED.scarcity, text_density=EXCLUDED.text_density, language=EXCLUDED.language, narrator=EXCLUDED.narrator, difficulty=EXCLUDED.difficulty`, runID, scarcity, density, language, narrator, difficulty).Error
 }
+
+// Backwards-compatible wrapper for existing call sites without difficulty (defaults to 'standard').
+func (sr *SettingsRepo) UpsertLegacy(ctx context.Context, runID uuid.UUID, scarcity bool, density, language, narrator string) error {
+	return sr.Upsert(ctx, runID, scarcity, density, language, narrator, "standard")
+}
+
 func (sr *SettingsRepo) ToggleScarcity(ctx context.Context, runID uuid.UUID) error {
 	return sr.db.gorm.WithContext(ctx).Exec(`UPDATE settings SET scarcity = NOT scarcity WHERE run_id = ?`, runID).Error
 }
 func (sr *SettingsRepo) CycleDensity(ctx context.Context, runID uuid.UUID) error {
 	return sr.db.gorm.WithContext(ctx).Exec(`UPDATE settings SET text_density = CASE text_density WHEN 'concise' THEN 'standard' WHEN 'standard' THEN 'rich' ELSE 'concise' END WHERE run_id = ?`, runID).Error
 }
+func (sr *SettingsRepo) ToggleNarrator(ctx context.Context, runID uuid.UUID) error {
+	return sr.db.gorm.WithContext(ctx).Exec(`UPDATE settings SET narrator = CASE narrator WHEN 'off' THEN 'auto' ELSE 'off' END WHERE run_id = ?`, runID).Error
+}
+func (sr *SettingsRepo) CycleDifficulty(ctx context.Context, runID uuid.UUID) error {
+	return sr.db.gorm.WithContext(ctx).Exec(`UPDATE settings SET difficulty = CASE difficulty WHEN 'easy' THEN 'standard' WHEN 'standard' THEN 'hard' ELSE 'easy' END WHERE run_id = ?`, runID).Error
+}
 
 // Get retrieves current settings for run.
 func (sr *SettingsRepo) Get(ctx context.Context, runID uuid.UUID) (Settings, error) {
-	row := sr.db.gorm.WithContext(ctx).Raw(`SELECT run_id, scarcity, text_density, language, narrator FROM settings WHERE run_id = ?`, runID).Row()
+	row := sr.db.gorm.WithContext(ctx).Raw(`SELECT run_id, scarcity, text_density, language, narrator, COALESCE(difficulty,'standard') FROM settings WHERE run_id = ?`, runID).Row()
 	var s Settings
-	if err := row.Scan(&s.RunID, &s.Scarcity, &s.TextDensity, &s.Language, &s.Narrator); err != nil {
+	if err := row.Scan(&s.RunID, &s.Scarcity, &s.TextDensity, &s.Language, &s.Narrator, &s.Difficulty); err != nil {
 		return Settings{}, err
 	}
 	return s, nil
@@ -396,6 +454,7 @@ type Settings struct {
 	TextDensity string
 	Language    string
 	Narrator    string
+	Difficulty  string
 }
 
 type SceneWithOutcome struct {
