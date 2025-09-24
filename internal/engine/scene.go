@@ -215,14 +215,20 @@ func GenerateChoices(r *rand.Rand, s Survivor, opts ...ChoiceOption) []Choice {
 }
 
 // ApplyChoice applies mechanical deltas and returns resulting stats delta.
-func ApplyChoice(s *Survivor, c Choice) Stats {
+func ApplyChoice(s *Survivor, c Choice, diff Difficulty, currentTurn int) Stats {
 	d := c.Delta
 	// Convert cost to drains
 	d.Fatigue += c.Cost.Fatigue
 	d.Hunger += c.Cost.Hunger
 	d.Thirst += c.Cost.Thirst
-	// baseline drains by difficulty (placeholder until difficulty plumbed through survivor/env)
-	baseH, baseT, baseF := 2, 3, 2
+	// baseline drains by difficulty
+	baseH, baseT, baseF := 2, 3, 2 // standard defaults
+	switch diff {
+	case DifficultyEasy:
+		baseH, baseT, baseF = 1, 2, 1
+	case DifficultyHard:
+		baseH, baseT, baseF = 3, 4, 3
+	}
 	d.Hunger += baseH
 	d.Thirst += baseT
 	d.Fatigue += baseF
@@ -232,9 +238,8 @@ func ApplyChoice(s *Survivor, c Choice) Stats {
 	// s.Tick()
 	s.EvaluateDeath()
 	if c.Index == -1 && s.Meters != nil {
-		if len(c.Label) > 8 {
-			s.Meters[MeterCustomLastTurn] = s.Environment.WorldDay*10000
-		}
+		// record last custom action turn for cooldown enforcement
+		s.Meters[MeterCustomLastTurn] = currentTurn
 	}
 	if c.Archetype != "" {
 		s.GainSkill(relevantSkill(c.Archetype), true)

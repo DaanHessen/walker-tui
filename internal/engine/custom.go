@@ -43,22 +43,7 @@ func ValidateCustomAction(input string, base Survivor) (Choice, bool, string) {
 	if lc, ok := base.Meters[MeterScent]; ok {
 		_ = lc
 	} // placeholder
-	if v, ok := base.Meters[MeterNoise]; ok && v == 999 { /* reserved sentinel not used now */
-	}
-	if prev, ok := base.Meters[MeterVisibility]; ok && prev == 777 { /* placeholder */
-	}
-	if base.Meters != nil {
-		if lastType, ok := base.Meters[MeterScent]; ok && lastType == 555 { /* reserved */
-		}
-	}
-	// Simple cooldown via stored last custom archetype in Meters[MeterNoise] encoded as hash of archetype.
-	if base.Meters != nil {
-		key := MeterNoise
-		hash := int(archetype[0])
-		if prev, ok := base.Meters[key]; ok && prev == hash {
-			return Choice{}, false, "Repeat cooldown"
-		}
-	}
+	// remove obsolete hash-based cooldown; real cooldown enforced in UI using MeterCustomLastTurn
 	// Map archetype to synthetic choice (index -1 indicates synthetic)
 	c := Choice{Index: -1, Label: "Custom: " + input, Risk: RiskLow, Archetype: archetype}
 	switch archetype {

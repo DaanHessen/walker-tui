@@ -236,7 +236,7 @@ func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor 
 		Stats:       stats,
 		BodyTemp:    TempMild,
 		Conditions:  nil,
-		Meters:      map[Meter]int{MeterNoise:0,MeterVisibility:0,MeterScent:0,MeterThirstStreak:0,MeterColdExposure:0,MeterFeverRest:0,MeterWarmStreak:0,MeterExhaustionScenes:0,MeterCustomLastTurn:-10},
+		Meters:      map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0, MeterThirstStreak: 0, MeterColdExposure: 0, MeterFeverRest: 0, MeterWarmStreak: 0, MeterExhaustionScenes: 0, MeterCustomLastTurn: -10},
 		Inventory:   inv,
 		Environment: Environment{WorldDay: worldDay, TimeOfDay: initialTOD(r), Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad, Timezone: zone},
 		Alive:       true,
@@ -281,7 +281,7 @@ func NewGenericSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivo
 	zone := zones[r.Intn(len(zones))]
 	return Survivor{
 		Name: fullName, Age: 16 + r.Intn(40), Background: prof.Name, Region: originRegion, Location: loc, Group: g, GroupSize: gSize,
-		Traits: traits, Skills: skills, Stats: stats, BodyTemp: TempMild, Conditions: nil, Meters: map[Meter]int{MeterNoise:0,MeterVisibility:0,MeterScent:0,MeterThirstStreak:0,MeterColdExposure:0,MeterFeverRest:0,MeterWarmStreak:0,MeterExhaustionScenes:0,MeterCustomLastTurn:-10}, Inventory: inv,
+		Traits: traits, Skills: skills, Stats: stats, BodyTemp: TempMild, Conditions: nil, Meters: map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0, MeterThirstStreak: 0, MeterColdExposure: 0, MeterFeverRest: 0, MeterWarmStreak: 0, MeterExhaustionScenes: 0, MeterCustomLastTurn: -10}, Inventory: inv,
 		Environment: Environment{WorldDay: worldDay, TimeOfDay: initialTOD(r), Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad, Timezone: zone}, Alive: true,
 	}
 }

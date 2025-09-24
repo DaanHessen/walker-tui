@@ -169,9 +169,10 @@ func (m *model) continueGame() {
 // newSceneTx inserts scene + choices transactionally, renders markdown.
 func (m *model) newSceneTx() error {
 	return m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
-		m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected))
+		m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
 		m.customEnabled = true
 		m.customStatus = ""
+		// cooldown check will happen in handleCustomAction
 		state := m.survivor.NarrativeState()
 		md, _ := m.narrator.Scene(m.ctx, state)
 		sceneRepo := store.NewSceneRepo(m.db)
@@ -518,12 +519,19 @@ func (m *model) buildSidebar() string {
 	}
 	// Skills grid all
 	b.WriteString("SKILLS\n")
-	if len(s.Skills)==0 { b.WriteString("(none)\n") } else {
-		names := make([]string,0,len(s.Skills))
+	if len(s.Skills) == 0 {
+		b.WriteString("(none)\n")
+	} else {
+		names := make([]string, 0, len(s.Skills))
 		vals := map[string]int{}
-		for k,v := range s.Skills { names = append(names,string(k)); vals[string(k)] = v }
+		for k, v := range s.Skills {
+			names = append(names, string(k))
+			vals[string(k)] = v
+		}
 		sort.Strings(names)
-		for _, name := range names { b.WriteString(fmt.Sprintf("%s:%d ", abbrev(name), vals[name])) }
+		for _, name := range names {
+			b.WriteString(fmt.Sprintf("%s:%d ", abbrev(name), vals[name]))
+		}
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -620,11 +628,22 @@ func (m *model) cycleDensity() {
 }
 
 func (m *model) forceRegenerateChoices() {
-	m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected))
+	m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
 	m.md = m.renderSceneLayout()
 }
 
 func (m *model) handleCustomAction() {
+	// enforce 2-scene cooldown since last custom (stored turn number)
+	if m.survivor.Meters != nil {
+		if last, ok := m.survivor.Meters[engine.MeterCustomLastTurn]; ok {
+			if m.turn-last < 2 { // need at least 2 full scenes gap
+				m.customStatus = "cooldown"
+				m.customEnabled = false
+				m.md = m.renderSceneLayout()
+				return
+			}
+		}
+	}
 	choice, ok, reason := engine.ValidateCustomAction(m.customInput, m.survivor)
 	if !ok {
 		m.customStatus = reason
@@ -644,7 +663,7 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 	prevTurn := m.turn
 	var deathCause string
 	err := m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
-		delta := engine.ApplyChoice(&m.survivor, c)
+		delta := engine.ApplyChoice(&m.survivor, c, engine.Difficulty(m.settings.Difficulty), m.turn)
 		upRepo := store.NewUpdateRepo(m.db)
 		outRepo := store.NewOutcomeRepo(m.db)
 		survRepo := store.NewSurvivorRepo(m.db)
@@ -735,7 +754,7 @@ func (m *model) spawnReplacementTx() error {
 		}
 		m.survivor = newSurv
 		m.survivorID = sid
-		m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected))
+		m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
 		state := m.survivor.NarrativeState()
 		md, _ := m.narrator.Scene(m.ctx, state)
 		sceneRepo := store.NewSceneRepo(m.db)
