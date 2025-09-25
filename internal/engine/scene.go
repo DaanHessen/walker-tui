@@ -226,7 +226,7 @@ func relevantSkill(a string) Skill {
 }
 
 func adjustRisk(c *Choice, s Survivor, cfg choiceConfig) {
-	base := riskScore(c.Risk)
+    base := riskScore(c.Risk)
 	sk := relevantSkill(c.Archetype)
 	lvl := s.Skills[sk]
 	if lvl >= 4 {
@@ -258,12 +258,19 @@ func adjustRisk(c *Choice, s Survivor, cfg choiceConfig) {
 	if cfg.difficulty == DifficultyEasy && (c.Archetype == "forage" || c.Archetype == "rest" || c.Archetype == "scout") {
 		base--
 	}
-	if cfg.difficulty == DifficultyHard && isHighExertionChoice(*c) {
-		base++
-	}
-	if base < 0 {
-		base = 0
-	}
+    if cfg.difficulty == DifficultyHard && isHighExertionChoice(*c) {
+        base++
+    }
+    // Progressive infected pressure post-arrival
+    if s.Environment.WorldDay >= s.Environment.LAD {
+        days := s.Environment.WorldDay - s.Environment.LAD
+        if days >= 14 && c.Archetype != "rest" {
+            base++
+        }
+    }
+    if base < 0 {
+        base = 0
+    }
 	if base > 2 {
 		base = 2
 	}

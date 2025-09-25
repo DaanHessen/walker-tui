@@ -53,16 +53,17 @@ type Inventory struct {
 }
 
 type Environment struct {
-	WorldDay  int
-	TimeOfDay string
-	Season    Season
-	Weather   Weather
-	TempBand  TempBand
-	Region    string
-	Location  LocationType
-	LAD       int
-	Infected  bool
-	Timezone  string // IANA timezone identifier
+    WorldDay  int
+    TimeOfDay string
+    Season    Season
+    Weather   Weather
+    TempBand  TempBand
+    Region    string
+    Location  LocationType
+    LAD       int
+    Infected  bool
+    Timezone  string // IANA timezone identifier
+    DistanceToOriginKM float64 // optional; first survivor ~<=100km; not displayed
 }
 
 // ComputeLAD calculates Local Arrival Day based on distance and modifiers.
@@ -228,17 +229,18 @@ func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
     // derive a non-revealing region label for UI
     regionLabel := generalRegion(originRegion, stream.Child("region-label"))
     env := Environment{
-		WorldDay:  worldDay,
-		TimeOfDay: initialTOD(stream.Child("tod")),
-		Season:    SeasonSpring,
-		Weather:   WeatherClear,
-		TempBand:  TempMild,
+        WorldDay:  worldDay,
+        TimeOfDay: initialTOD(stream.Child("tod")),
+        Season:    SeasonSpring,
+        Weather:   WeatherClear,
+        TempBand:  TempMild,
         Region:    regionLabel,
-		Location:  loc,
-		LAD:       lad,
-		Infected:  worldDay >= lad,
-		Timezone:  zone,
-	}
+        Location:  loc,
+        LAD:       lad,
+        Infected:  worldDay >= lad,
+        Timezone:  zone,
+        DistanceToOriginKM: stream.Child("origin-distance").Float64()*100.0, // 0..100
+    }
 
     survivor := Survivor{
 		Name:        fullName,

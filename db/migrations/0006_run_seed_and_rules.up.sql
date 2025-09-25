@@ -25,6 +25,19 @@ BEGIN
         EXECUTE 'ALTER TABLE runs ADD COLUMN seed TEXT';
     END IF;
 
+    -- Make legacy seed_int nullable to avoid insert violations when only seed TEXT is set
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='runs' AND column_name='seed_int'
+    ) THEN
+        BEGIN
+            EXECUTE 'ALTER TABLE runs ALTER COLUMN seed_int DROP NOT NULL';
+        EXCEPTION WHEN others THEN
+            -- in case it's already nullable or constraint absent
+            NULL;
+        END;
+    END IF;
+
     -- Ensure rules_version exists
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
