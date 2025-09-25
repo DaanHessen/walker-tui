@@ -1,77 +1,84 @@
-# Zero Point (Prototype)
+# Zero Point
+
+*An AI-directed survival game, where every choice could be your last...*
+
+## What is this?
+
+Zero Point drops you into a post-apocalyptic world where a synthetic virus has turned civilization into a living horror. But, this isn't your typical zombie game; it's an AI-powered narrative experience that creates unique, branching stories for each survivor you control. When your character dies (they will), the world keeps running, and you'll step into the shoes of someone else trying to navigate the same, unforgiving reality. Your `days after outbreak` won't change, your inventory and skills will. You can decide to join a group, build a civilization, or go at it alone. This world is yours to conquer.  
 
 ## Quick Start
-Requirements: Go 1.22+, Docker, DeepSeek API access.
+
+**Requirements**: Go 1.22+, Docker, DeepSeek API key
 
 ```bash
-make db-up       # start postgres (docker)
-make migrate-up  # apply migrations
-export DEEPSEEK_API_KEY=sk-... # required: director + narrator
-make run         # launch game
+# Clone the repo and navigate to it
+git clone https://github.com/DaanHessen/walker-tui.git
+cd walker-tui
+
+# Get your database running
+make db-up
+
+# Apply database migrations
+make migrate-up
+
+# Set your DeepSeek API key (get one at https://platform.deepseek.com/api_keys)
+export DEEPSEEK_API_KEY=sk-your-key-here
+
+# Play!
+make run
 ```
-Default DSN auto-applied if unset:
-`postgres://dev:dev@localhost:5432/zeropoint?sslmode=disable`
+
+## Your first moments
+
+When Zero Point starts, you'll see a character sheet for your randomly generated survivor—maybe Sarah, a 34-year-old nurse from the suburbs with a pragmatic streak and medical training. The world is at Day 0, but something is very wrong. News reports are scattered. People are on edge.
+
+The AI narrator describes your immediate situation in vivid second-person prose, then presents you with 2-6 choices. Each choice shows its costs (time, fatigue, hunger, thirst, risk level) and reflects your character's capabilities. That medical training? It affects what options you see and how successful you'll be.
+
+Choose wisely. The infection is spreading according to realistic geographic and transportation patterns. What starts as distant news reports will become very personal, very quickly.
+
+## Key features
+
+**🧠 AI-Driven Everything**: AI generates scenarios, narrates outcomes, and adapts to your playstyle. Every choice branch is contextually appropriate and narratively compelling.
+
+**🌍 Persistent World Timeline**: When your character dies, you don't restart—you become someone else in the same evolving world. Previous characters' actions have consequences.
+
+**📊 Realistic Infection Modeling**: The outbreak spreads from a specific ground-zero facility outward, following realistic transportation networks and response patterns. No "suddenly zombies everywhere" nonsense.
+
+**⚙️ Deep Character Systems**: Skills matter. A technician sees different opportunities than a paramedic. Traits like "cautious" or "impulsive" shape available actions.
+
+**🎨 Beautiful Terminal UI**: Four gorgeous themes (Catppuccin, Dracula, Gruvbox, Solarized Dark) with responsive layouts and smooth interactions.
+
+**🎲 Deterministic Chaos**: Every game uses a seed, so interesting worlds can be shared and replayed, but AI narration ensures the stories stay fresh.
+
+**📚 Archive System**: Your fallen survivors become archive cards with AI-generated epitaphs and their most memorable decisions.
+
+## Advanced features
+
+- **Custom Actions**: Type your own actions beyond the provided choices. The AI determines if they're feasible and what happens.
+- **Export System**: Save complete narrative logs as markdown for sharing or posterity.
+- **Timeline View**: Scroll back through the entire world's history across all your survivors.
 
 ## Controls
-- 1-6 choose action
-- Enter commit custom action (after typing)
-- tab cycle views (scene/log/archive/settings)
-- l logs view
-- a archive view (Up/Down, Enter detail)
-- s settings view
-- t toggle scarcity (settings)
-- d cycle text density (settings)
-- c cycle theme (settings)
-- e export run to `~/.zero-point/exports`
-- pgup/pgdown scroll scene, home/end jump
-- y timeline view (PgUp/PgDn scroll, Esc to exit)
-- ? help toggle
-- q / ctrl+c quit
 
-## Implemented
-- Postgres persistence (runs, survivors, scenes, choices, updates, outcomes, master logs, archive cards, settings)
-- Enum constraints migration + idempotent column rename
-- LAD heuristic + infection gating (risk softened pre-arrival) + debug toggle
-- Deterministic RNG seed injection + pre-run world config (seed, scarcity, density, theme)
-- Transactional turn resolution + death -> archive + immediate respawn
-- Multi-day loop (advances every 6 scenes placeholder)
-- DeepSeek-only director + narrator driven by `docs/instructions.md`
-- Loading overlay with rotating DB-backed tips while new runs bootstrap
-- Choice generation influenced by scarcity, density, infection presence, basic skill hooks
-- Custom action system with archetype mapping + gating (fatigue, critical needs, cooldown)
-- Themed TUI (Catppuccin default + Dracula/Gruvbox/Solarized Dark)
-- Timezone + local datetime in narrative state
-- Archive cards + interactive archive browser
-- Export full run narrative as markdown
-- Settings view & dynamic choice regeneration, including theme preview
-- Responsive TUI layout (top bar, sidebar, bottom bar, scrolling main pane)
-- Timeline view with scrollback history
+- **1-6**: Choose numbered actions
+- **Enter**: Commit custom typed actions  
+- **Tab**: Cycle between views (scene/log/archive/settings)
+- **Y**: Timeline view with full world history
+- **E**: Export current run to markdown
+- **C**: Cycle themes in real-time
+- **?**: Help and rules reference
+- **Q**: Quit (with auto-save)
 
-## Planned / Not Yet
-- Richer choice taxonomy (travel, crafting, social, shelter)
-- Deeper skill progression & stat-driven modifiers
-- Conditions system with mechanical effects
-- Enhanced archive (AI epitaph, pivotal moments synthesis)
-- Streaming AI + improved retry/backoff
-- Language switching / localization
-- Unit & integration tests (LAD gating, first survivor distribution, custom action mapping, migration idempotence)
-- Better world settings (difficulty presets, start region select)
-- License text
+## Architecture
 
-## Environment
-`DEEPSEEK_API_KEY` **must** be set; without it the TUI shows a blocking error screen.
+Zero Point is built in Go with a PostgreSQL backend and uses the Bubble Tea framework for its terminal UI. The AI integration uses DeepSeek's reasoner model for both strategic event planning and prose generation. State is carefully managed to ensure consistent world simulation while allowing for creative AI interpretation.
 
 ## License
-TBD
 
-# Walker TUI
-
-## Recent Additions
-- Loading screen with rotating worldbuilding tips while DeepSeek warms up
-- Theme selector (Catppuccin, Dracula, Gruvbox, Solarized Dark)
-- Basic skill progression tied to choice archetypes (forage, rest, observe, organize, etc.)
-
-### Difficulty Presets (Prototype)
-Easy: +20% forage yield, lower fatigue drains.
-Standard: baseline.
-Hard: -25% forage yield, higher fatigue drains and moderate risks softened less.
+```
+She like to party like it's 1999
+Ayy, girl, don't be playin' with my–
+Now is not the time
+It's closin' time, what you want? Nevermind
+Hurry up, call the cut, don't be playin' 'round this time
+```
