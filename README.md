@@ -30,7 +30,7 @@ make run
 
 ## Your first moments
 
-When Zero Point starts, you'll see a character sheet for your randomly generated survivor—maybe Sarah, a 34-year-old nurse from the suburbs with a pragmatic streak and medical training. The world is at Day 0, but something is very wrong. News reports are scattered. People are on edge.
+When Zero Point starts, you'll see a character sheet for your randomly generated survivor - maybe Sarah, a 34-year-old nurse from the suburbs with a pragmatic streak and medical training. The world is at Day 0, but something is very wrong. News reports are scattered. People are on edge.
 
 The AI narrator describes your immediate situation in vivid second-person prose, then presents you with 2-6 choices. Each choice shows its costs (time, fatigue, hunger, thirst, risk level) and reflects your character's capabilities. That medical training? It affects what options you see and how successful you'll be.
 
