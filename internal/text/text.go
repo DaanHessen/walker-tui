@@ -39,7 +39,7 @@ func NewDeepSeek(apiKey string) (*DeepSeek, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DeepSeek{apiKey: apiKey, client: &http.Client{Timeout: 2 * time.Second}, prompt: prompt}, nil
+	return &DeepSeek{apiKey: apiKey, client: &http.Client{Timeout: 120 * time.Second}, prompt: prompt}, nil
 }
 
 func (d *DeepSeek) Scene(ctx context.Context, st any) (string, error) {

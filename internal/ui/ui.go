@@ -148,6 +148,7 @@ type model struct {
 	loadingTip     string
 	spinnerFrame   int
 	startupErr     error
+	errorTitle     string
 	errorMessage   string
 	// custom action
 	customInput   string
@@ -358,11 +359,6 @@ func (m *model) handleWorldConfigKey(msg tea.KeyMsg) bool {
 		m.preRunTheme = next
 		m.applyTheme(next)
 		return true
-	case "4":
-		seed := randomSeedText()
-		m.preRunSeedText = seed
-		m.preRunSeedBuffer = seed
-		return true
 	case "5", "esc":
 		m.view = viewMainMenu
 		return true
@@ -415,6 +411,7 @@ func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, pla
 	m.tipIndex = 0
 	m.startupErr = startupErr
 	if startupErr != nil {
+		m.errorTitle = "Startup Error"
 		m.errorMessage = startupErr.Error()
 		m.view = viewError
 	}
@@ -454,9 +451,8 @@ func (m *model) bootstrapPersistence() error {
 func (m *model) startNewGame() tea.Cmd {
 	if m.planner == nil || m.narrator == nil {
 		m.view = viewError
-		if m.errorMessage == "" {
-			m.errorMessage = "DeepSeek API unavailable. Configure DEEPSEEK_API_KEY before starting a new game."
-		}
+		m.errorTitle = "DeepSeek Required"
+		m.errorMessage = "Configure DEEPSEEK_API_KEY before starting a new game."
 		return nil
 	}
 	input := strings.TrimSpace(m.preRunSeedBuffer)
@@ -498,9 +494,8 @@ func (m *model) continueGame() {
 	m.loading = false
 	if m.planner == nil || m.narrator == nil {
 		m.view = viewError
-		if m.errorMessage == "" {
-			m.errorMessage = "DeepSeek API unavailable. Configure DEEPSEEK_API_KEY before continuing a run."
-		}
+		m.errorTitle = "DeepSeek Required"
+		m.errorMessage = "Configure DEEPSEEK_API_KEY before continuing a run."
 		return
 	}
 	rr := store.NewRunRepo(m.db)
@@ -656,10 +651,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.loadingMessage = ""
 			m.loadingTip = ""
-			m.md = "Failed to start new game: " + msg.err.Error()
-			m.view = viewMainMenu
+			m.errorTitle = "New Game Failed"
+			m.errorMessage = msg.err.Error()
+			m.view = viewError
 			return m, nil
 		}
+		m.errorTitle = ""
+		m.errorMessage = ""
 		res := msg.result
 		m.runID = res.RunID
 		m.survivorID = res.SurvivorID
@@ -710,6 +708,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		k := msg.String()
+		if m.view == viewError {
+			switch k {
+			case "enter", "esc", "q", " ":
+				m.view = viewMainMenu
+			}
+			return m, nil
+		}
 		// timeline navigation
 		if m.view == viewTimeline {
 			switch k {
@@ -968,12 +973,17 @@ func (m *model) renderErrorScreen() string {
 	if height < 12 {
 		height = 12
 	}
-	msg := "DeepSeek API unavailable. Set DEEPSEEK_API_KEY in your environment to enable narration and events."
-	if m.errorMessage != "" {
-		msg = msg + "\n\n" + m.errorMessage
+	title := m.errorTitle
+	if title == "" {
+		title = "DeepSeek Required"
 	}
+	msg := m.errorMessage
+	if strings.TrimSpace(msg) == "" {
+		msg = "Set DEEPSEEK_API_KEY in your environment to enable narration and events."
+	}
+	msg = msg + "\n\nPress Enter to return to the main menu."
 	body := lipgloss.JoinVertical(lipgloss.Left,
-		m.styles.title.Render("DeepSeek Required"),
+		m.styles.title.Render(title),
 		m.styles.muted.Render(msg),
 	)
 	box := m.styles.menuBox.Width(56).Render(body)
@@ -1238,27 +1248,37 @@ func (m *model) renderMainMenu() string {
 }
 
 func (m *model) renderWorldConfig() string {
+	width := m.width
+	if width < 68 {
+		width = 68
+	}
+	height := m.height
+	if height < 14 {
+		height = 14
+	}
+	seedHint := "Press Enter to edit (Esc to cancel)."
+	if m.preRunSeedEditing {
+		seedHint = "Editing — Enter to confirm, Esc to cancel."
+	}
 	scar := "Off"
 	if m.preRunScarcity {
 		scar = "On"
 	}
-	seedHint := "(press Enter to edit)"
-	if m.preRunSeedEditing {
-		seedHint = "(editing — Esc to stop)"
+	lines := []string{
+		"WORLD SETTINGS (Pre-Run)",
+		"",
+		fmt.Sprintf("Seed [%d/%d]", len(m.preRunSeedBuffer), maxSeedLength),
+		m.styles.accent.Render(m.preRunSeedBuffer),
+		m.styles.muted.Render(seedHint),
+		"",
+		fmt.Sprintf("Scarcity: %s %s", scar, m.styles.muted.Render("(press 1 to toggle)")),
+		fmt.Sprintf("Text Density: %s %s", m.preRunDensity, m.styles.muted.Render("(press 2 to cycle)")),
+		fmt.Sprintf("Theme: %s %s", m.preRunTheme, m.styles.muted.Render("(press 3 to cycle)")),
+		"",
+		m.styles.muted.Render("Use Backspace while editing. Press 5 or Esc to return."),
 	}
-	content := fmt.Sprintf(
-		"WORLD SETTINGS (Pre-Run)\n\nSeed [%d/%d]: %s %s\nScarcity: %s (1 toggle)\nText Density: %s (2 cycle)\nTheme: %s (3 cycle)\n[4] Regenerate Seed\n[5] Back\n",
-		len(m.preRunSeedBuffer), maxSeedLength, m.preRunSeedBuffer, seedHint, scar, m.preRunDensity, m.preRunTheme,
-	)
-	box := m.styles.menuBox.Width(62).Render(content)
-	width := m.width
-	if width < 62 {
-		width = 62
-	}
-	height := m.height
-	if height < 12 {
-		height = 12
-	}
+	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	box := m.styles.menuBox.Width(66).Render(body)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -1692,11 +1712,34 @@ func (m *model) renderArchive() string {
 }
 
 func (m *model) renderHelp() string {
-	return fmt.Sprintf("ABOUT / RULES\n\nSeed & Rules: %s • %s\n\nYou manage sequential survivors in the early outbreak (LAD gate)."+
-		" Maintain core needs (health, hunger, thirst, fatigue, morale). Infected risk only after Local Arrival Day."+
-		" Each turn: read scene, pick 1 action (1-6) or craft a concise custom verb phrase. Outcomes adjust stats and may cause death."+
-		" Death creates an archive card; a new survivor appears immediately.\n\nControls: 1-6 choose | Enter custom | Tab cycle views | L logs | A archive | S settings | Y timeline | T scarcity (settings) | D density (settings) | C theme (settings) | E export | F6 LAD debug | Q quit.\n\nEsc returns from subviews.",
-		m.runSeed.Text, m.rulesVersion)
+	width := m.width
+	if width < 76 {
+		width = 76
+	}
+	height := m.height
+	if height < 18 {
+		height = 18
+	}
+	lines := []string{
+		"ABOUT / RULES",
+		"",
+		fmt.Sprintf("Seed & Rules: %s • %s", m.runSeed.Text, m.rulesVersion),
+		"",
+		"Zero Point is a sequential survival anthology directed by DeepSeek.",
+		m.styles.muted.Render("Maintain health, hunger, thirst, fatigue, and morale."),
+		m.styles.muted.Render("Infected threats appear only after Local Arrival Day (LAD)."),
+		m.styles.muted.Render("Choose one action each turn (1-6) or enter a concise custom verb."),
+		m.styles.muted.Render("Outcomes adjust stats; death archives the survivor and the timeline continues."),
+		"",
+		"Controls:",
+		m.styles.muted.Render("1-6 choose action   Enter commit custom input   Tab cycle views"),
+		m.styles.muted.Render("L logs   A archive   S settings   Y timeline   E export run"),
+		m.styles.muted.Render("T scarcity   D density   C theme   F6 toggle LAD debug"),
+		m.styles.muted.Render("Press ? or Esc to return."),
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	box := m.styles.menuBox.Width(72).Render(body)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m *model) renderSettings() string {
