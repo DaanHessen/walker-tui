@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	errs "errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DaanHessen/walker-tui/internal/engine"
@@ -61,6 +62,15 @@ type Run struct {
 	CurrentDay   int
 	SeedText     string
 	RulesVersion string
+	ProfileID    uuid.UUID
+	LastPlayedAt time.Time
+}
+
+type Profile struct {
+	ID         uuid.UUID
+	Name       string
+	CreatedAt  time.Time
+	LastUsedAt time.Time
 }
 
 type SurvivorRecord struct {
@@ -89,18 +99,59 @@ type RunRepo struct{ db *DB }
 
 func NewRunRepo(db *DB) *RunRepo { return &RunRepo{db: db} }
 
-// CreateWithSeed inserts a run with canonical seed text.
-func (r *RunRepo) CreateWithSeed(ctx context.Context, origin, seedText, rulesVersion string) (Run, error) {
+type ProfileRepo struct{ db *DB }
+
+func NewProfileRepo(db *DB) *ProfileRepo { return &ProfileRepo{db: db} }
+
+func (pr *ProfileRepo) List(ctx context.Context) ([]Profile, error) {
+	rows, err := pr.db.gorm.WithContext(ctx).Raw(`SELECT id, name, created_at, last_used_at FROM profiles ORDER BY last_used_at DESC, created_at DESC`).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var profiles []Profile
+	for rows.Next() {
+		var p Profile
+		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedAt, &p.LastUsedAt); err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+func (pr *ProfileRepo) Create(ctx context.Context, name string) (Profile, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Profile{}, errs.New("profile name required")
+	}
+	var p Profile
+	row := pr.db.gorm.WithContext(ctx).Raw(`INSERT INTO profiles(id, name) VALUES(uuid_generate_v4(), ?) RETURNING id, name, created_at, last_used_at`, name).Row()
+	if err := row.Scan(&p.ID, &p.Name, &p.CreatedAt, &p.LastUsedAt); err != nil {
+		return Profile{}, err
+	}
+	return p, nil
+}
+
+func (pr *ProfileRepo) Touch(ctx context.Context, id uuid.UUID) error {
+	return pr.db.gorm.WithContext(ctx).Exec(`UPDATE profiles SET last_used_at = now() WHERE id = ?`, id).Error
+}
+
+// CreateWithSeed inserts a run with canonical seed text for the provided profile.
+func (r *RunRepo) CreateWithSeed(ctx context.Context, profileID uuid.UUID, origin, seedText, rulesVersion string) (Run, error) {
+	if profileID == uuid.Nil {
+		return Run{}, errs.New("profile id required")
+	}
 	id := uuid.New()
-	if err := r.db.gorm.Exec(`INSERT INTO runs(id, origin_site, seed, rules_version) VALUES(?,?,?,?)`, id, origin, seedText, rulesVersion).Error; err != nil {
+	if err := r.db.gorm.Exec(`INSERT INTO runs(id, profile_id, origin_site, seed, rules_version, last_played_at) VALUES(?,?,?,?,?,now())`, id, profileID, origin, seedText, rulesVersion).Error; err != nil {
 		return Run{}, err
 	}
-	return Run{ID: id, OriginSite: origin, CurrentDay: 0, SeedText: seedText, RulesVersion: rulesVersion}, nil
+	return Run{ID: id, OriginSite: origin, CurrentDay: 0, SeedText: seedText, RulesVersion: rulesVersion, ProfileID: profileID, LastPlayedAt: time.Now()}, nil
 }
 
 // Legacy Create retained for backwards compatibility.
 func (r *RunRepo) Create(ctx context.Context, origin string, seed int64) (Run, error) {
-	return r.CreateWithSeed(ctx, origin, fmt.Sprint(seed), "1.0.0")
+	return Run{}, errs.New("profile id required")
 }
 
 // SurvivorRepo minimal creation.
@@ -307,21 +358,20 @@ func pqStringArray[T ~string](in []T) []string {
 	return out
 }
 
-// RunRepo additions
 func (r *RunRepo) Get(ctx context.Context, id uuid.UUID) (Run, error) {
-	row := r.db.gorm.Raw(`SELECT id, origin_site, current_day, COALESCE(seed, ''), COALESCE(rules_version,'1.0.0') FROM runs WHERE id = ?`, id).Row()
+	row := r.db.gorm.WithContext(ctx).Raw(`SELECT id, origin_site, current_day, COALESCE(seed, ''), COALESCE(rules_version,'1.0.0'), profile_id, COALESCE(last_played_at, now()) FROM runs WHERE id = ?`, id).Row()
 	var rr Run
-	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.CurrentDay, &rr.SeedText, &rr.RulesVersion); err != nil {
+	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.CurrentDay, &rr.SeedText, &rr.RulesVersion, &rr.ProfileID, &rr.LastPlayedAt); err != nil {
 		return Run{}, err
 	}
 	return rr, nil
 }
 
-// GetLatestRun returns most recently created run (by created_at) – assuming created_at exists.
-func (r *RunRepo) GetLatestRun(ctx context.Context) (Run, error) {
-	row := r.db.gorm.WithContext(ctx).Raw(`SELECT id, origin_site, current_day, COALESCE(seed, ''), COALESCE(rules_version,'1.0.0') FROM runs ORDER BY created_at DESC LIMIT 1`).Row()
+// GetLatestRun returns most recently played run for profile.
+func (r *RunRepo) GetLatestRun(ctx context.Context, profileID uuid.UUID) (Run, error) {
+	row := r.db.gorm.WithContext(ctx).Raw(`SELECT id, origin_site, current_day, COALESCE(seed, ''), COALESCE(rules_version,'1.0.0'), profile_id, COALESCE(last_played_at, now()) FROM runs WHERE profile_id = ? ORDER BY last_played_at DESC LIMIT 1`, profileID).Row()
 	var rr Run
-	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.CurrentDay, &rr.SeedText, &rr.RulesVersion); err != nil {
+	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.CurrentDay, &rr.SeedText, &rr.RulesVersion, &rr.ProfileID, &rr.LastPlayedAt); err != nil {
 		return Run{}, err
 	}
 	return rr, nil
@@ -543,7 +593,7 @@ func (r *RunRepo) UpdateDay(ctx context.Context, tx *gorm.DB, id uuid.UUID, day 
 	if tx != nil {
 		exec = tx.WithContext(ctx)
 	}
-	return exec.Exec(`UPDATE runs SET current_day = ? WHERE id = ?`, day, id).Error
+	return exec.Exec(`UPDATE runs SET current_day = ?, last_played_at = now() WHERE id = ?`, day, id).Error
 }
 
 // LogRepo insert master log

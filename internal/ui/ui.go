@@ -26,6 +26,7 @@ import (
 
 const (
 	viewMainMenu    = "main_menu"
+	viewProfile     = "profile_select"
 	viewScene       = "scene"
 	viewLog         = "log"
 	viewArchive     = "archive"
@@ -138,6 +139,12 @@ type model struct {
 	logs           []store.MasterLog
 	archives       []store.ArchiveCard
 	settings       store.Settings
+	profiles       []store.Profile
+	activeProfile  store.Profile
+	profileIndex   int
+	profileEditing bool
+	profileInput   string
+	profileMessage string
 	exportStatus   string
 	debugLAD       bool
 	tips           []string
@@ -359,7 +366,7 @@ func (m *model) handleWorldConfigKey(msg tea.KeyMsg) bool {
 		m.preRunTheme = next
 		m.applyTheme(next)
 		return true
-	case "5", "esc":
+	case "esc":
 		m.view = viewMainMenu
 		return true
 	}
@@ -387,7 +394,31 @@ func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, pla
 		debugLAD:     cfg.DebugLAD,
 	}
 	m.applyTheme("catppuccin")
-	m.view = viewMainMenu
+	profRepo := store.NewProfileRepo(db)
+	profiles, err := profRepo.List(ctx)
+	if err != nil {
+		m.errorTitle = "Profile Error"
+		m.errorMessage = err.Error()
+		m.view = viewError
+		return m
+	}
+	if len(profiles) == 0 {
+		if created, err := profRepo.Create(ctx, "main"); err == nil {
+			profiles = append(profiles, created)
+		}
+	}
+	m.profiles = profiles
+	if len(m.profiles) == 0 {
+		m.errorTitle = "Profile Error"
+		m.errorMessage = "Unable to initialize profile storage."
+		m.view = viewError
+		return m
+	}
+	m.profileIndex = 0
+	m.profileEditing = false
+	m.profileInput = ""
+	m.profileMessage = "Press Enter to use profile, N to create a new one."
+	m.view = viewProfile
 	m.preRunScarcity = false
 	m.preRunDensity = cfg.TextDensity
 	if m.preRunDensity == "" {
@@ -422,11 +453,12 @@ func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, pla
 func (m *model) bootstrapPersistence() error {
 	runRepo := store.NewRunRepo(m.db)
 	survRepo := store.NewSurvivorRepo(m.db)
-	run, err := runRepo.CreateWithSeed(m.ctx, m.world.OriginSite, m.preRunSeedText, m.rulesVersion)
+	run, err := runRepo.CreateWithSeed(m.ctx, m.activeProfile.ID, m.world.OriginSite, m.preRunSeedText, m.rulesVersion)
 	if err != nil {
 		return err
 	}
 	m.runID = run.ID
+	_ = store.NewProfileRepo(m.db).Touch(m.ctx, m.activeProfile.ID)
 	// Mix runID and rules into runSeed for per-run uniqueness (post-persist)
 	m.runSeed = m.runSeed.WithRunContext(m.runID.String(), m.rulesVersion)
 	// Ensure world streams also use the mixed seed
@@ -449,6 +481,11 @@ func (m *model) bootstrapPersistence() error {
 
 // startNewGame persists and enters scene view.
 func (m *model) startNewGame() tea.Cmd {
+	if m.activeProfile.ID == uuid.Nil {
+		m.view = viewProfile
+		m.profileMessage = "Select or create a profile before starting."
+		return nil
+	}
 	if m.planner == nil || m.narrator == nil {
 		m.view = viewError
 		m.errorTitle = "DeepSeek Required"
@@ -492,6 +529,11 @@ func (m *model) startNewGame() tea.Cmd {
 // continueGame loads latest run & alive survivor, then generates a fresh scene (simplified resume).
 func (m *model) continueGame() {
 	m.loading = false
+	if m.activeProfile.ID == uuid.Nil {
+		m.view = viewProfile
+		m.profileMessage = "Select a profile before continuing."
+		return
+	}
 	if m.planner == nil || m.narrator == nil {
 		m.view = viewError
 		m.errorTitle = "DeepSeek Required"
@@ -499,7 +541,7 @@ func (m *model) continueGame() {
 		return
 	}
 	rr := store.NewRunRepo(m.db)
-	run, err := rr.GetLatestRun(m.ctx)
+	run, err := rr.GetLatestRun(m.ctx, m.activeProfile.ID)
 	if err != nil {
 		m.md = "No run to continue"
 		return
@@ -543,6 +585,7 @@ func (m *model) continueGame() {
 		m.md = "Failed to build scene: " + err.Error()
 		return
 	}
+	_ = store.NewProfileRepo(m.db).Touch(m.ctx, m.activeProfile.ID)
 	m.view = viewScene
 }
 
@@ -604,6 +647,9 @@ func (m *model) newSceneTx() error {
 func (m model) Init() tea.Cmd { return nil }
 
 func (m model) View() string {
+	if m.view == viewProfile {
+		return m.renderProfileSelect()
+	}
 	if m.view == viewMainMenu {
 		return m.renderMainMenu()
 	}
@@ -708,9 +754,80 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		k := msg.String()
+		if k == "ctrl+c" || (k == "q" && !m.preRunSeedEditing) {
+			return m, tea.Quit
+		}
+		if m.view == viewProfile {
+			if m.profileEditing {
+				switch msg.Type {
+				case tea.KeyEnter:
+					name := strings.TrimSpace(m.profileInput)
+					if name == "" {
+						m.profileMessage = "Profile name cannot be empty."
+						return m, nil
+					}
+					profRepo := store.NewProfileRepo(m.db)
+					if _, err := profRepo.Create(m.ctx, name); err != nil {
+						m.profileMessage = err.Error()
+						return m, nil
+					}
+					if profiles, err := profRepo.List(m.ctx); err == nil {
+						m.profiles = profiles
+						m.profileIndex = 0
+					}
+					m.profileEditing = false
+					m.profileInput = ""
+					m.profileMessage = "Profile created. Press Enter to continue."
+					return m, nil
+				case tea.KeyEsc:
+					m.profileEditing = false
+					m.profileInput = ""
+					m.profileMessage = "Press Enter to use profile, N to create a new one."
+					return m, nil
+				case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+					if len(m.profileInput) > 0 {
+						m.profileInput = m.profileInput[:len(m.profileInput)-1]
+					}
+					return m, nil
+				case tea.KeyRunes:
+					for _, r := range msg.Runes {
+						if r >= 32 && r < 127 {
+							m.profileInput += string(r)
+						}
+					}
+					return m, nil
+				}
+				return m, nil
+			}
+			switch k {
+			case "up", "k":
+				if m.profileIndex > 0 {
+					m.profileIndex--
+				}
+			case "down", "j":
+				if m.profileIndex < len(m.profiles)-1 {
+					m.profileIndex++
+				}
+			case "n":
+				m.profileEditing = true
+				m.profileInput = ""
+				m.profileMessage = "Type a profile name. Enter to create, Esc to cancel."
+			case "enter":
+				if len(m.profiles) == 0 {
+					return m, nil
+				}
+				selected := m.profiles[m.profileIndex]
+				m.activeProfile = selected
+				_ = store.NewProfileRepo(m.db).Touch(m.ctx, selected.ID)
+				m.view = viewMainMenu
+				m.profileMessage = ""
+				return m, nil
+			}
+			return m, nil
+		}
 		if m.view == viewError {
 			switch k {
-			case "enter", "esc", "q", " ":
+			case "enter", "esc", " ":
 				m.view = viewMainMenu
 			}
 			return m, nil
@@ -743,6 +860,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.view = viewTimeline
 			return m, nil
 		}
+		if k == "esc" {
+			switch m.view {
+			case viewHelp, viewSettings:
+				m.view = viewScene
+				return m, nil
+			case viewArchive:
+				m.view = viewScene
+				return m, nil
+			case viewWorldConfig:
+				m.view = viewMainMenu
+				return m, nil
+			}
+		}
 		if m.view == viewMainMenu {
 			switch k {
 			case "1":
@@ -755,6 +885,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.view = viewWorldConfig
 			case "5":
 				m.view = viewHelp
+			case "p":
+				m.view = viewProfile
 			}
 			return m, nil
 		}
@@ -1227,12 +1359,20 @@ func (m *model) renderMainMenu() string {
 	}
 	header := m.styles.title.Render("ZERO POINT — MAIN MENU")
 	options := []string{
+		"Profile: " + func() string {
+			if m.activeProfile.ID == uuid.Nil {
+				return "<select profile>"
+			}
+			return m.activeProfile.Name
+		}(),
+		"",
 		"[1] New Game",
 		"[2] Continue Game",
 		"[3] World Settings",
 		"[4] Survivor Archive",
 		"[5] About / Rules",
 		"",
+		"P Switch Profile",
 		"Q Quit",
 	}
 	if m.startupErr != nil {
@@ -1275,7 +1415,7 @@ func (m *model) renderWorldConfig() string {
 		fmt.Sprintf("Text Density: %s %s", m.preRunDensity, m.styles.muted.Render("(press 2 to cycle)")),
 		fmt.Sprintf("Theme: %s %s", m.preRunTheme, m.styles.muted.Render("(press 3 to cycle)")),
 		"",
-		m.styles.muted.Render("Use Backspace while editing. Press 5 or Esc to return."),
+		m.styles.muted.Render("Use Backspace while editing. Press Esc to return."),
 	}
 	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	box := m.styles.menuBox.Width(66).Render(body)
@@ -1786,6 +1926,46 @@ func (m *model) renderTimeline() string {
 		view = lines[start:end]
 	}
 	return title + "\n" + strings.Join(view, "\n")
+}
+
+func (m *model) renderProfileSelect() string {
+	width := m.width
+	if width < 68 {
+		width = 68
+	}
+	height := m.height
+	if height < 16 {
+		height = 16
+	}
+	var lines []string
+	lines = append(lines, "PROFILE SELECT")
+	lines = append(lines, "")
+	if len(m.profiles) == 0 {
+		lines = append(lines, "(no profiles found)")
+	} else {
+		for i, p := range m.profiles {
+			cursor := "  "
+			if i == m.profileIndex {
+				cursor = "> "
+			}
+			lines = append(lines, cursor+p.Name)
+		}
+	}
+	if m.profileEditing {
+		lines = append(lines, "")
+		lines = append(lines, "New profile: "+m.styles.accent.Render(m.profileInput))
+		lines = append(lines, m.styles.muted.Render("Enter to create, Esc to cancel."))
+	} else {
+		lines = append(lines, "")
+		lines = append(lines, m.styles.muted.Render("Up/Down to choose, Enter to confirm, N to create."))
+	}
+	if msg := strings.TrimSpace(m.profileMessage); msg != "" {
+		lines = append(lines, "")
+		lines = append(lines, m.styles.muted.Render(msg))
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	box := m.styles.menuBox.Width(60).Render(body)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // cycleLanguage is a placeholder; persist a stable value or simple cycle.

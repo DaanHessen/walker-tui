@@ -106,14 +106,37 @@ func (d *DeepSeek) PlanEvent(ctx context.Context, req engine.DirectorRequest) (e
 		{Role: "system", Content: d.prompt},
 		{Role: "user", Content: prompt},
 	}
-	raw, err := d.chat(ctx, messages, 600)
-	if err != nil {
-		return engine.DirectorPlan{}, err
-	}
-	cleaned := sanitizeOutput(raw)
 	var resp directorResponse
-	if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
-		return engine.DirectorPlan{}, fmt.Errorf("director json parse: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		raw, err := d.chat(ctx, messages, 600)
+		if err != nil {
+			lastErr = err
+			backoff(attempt)
+			continue
+		}
+		cleaned := sanitizeOutput(raw)
+		if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
+			lastErr = fmt.Errorf("director json parse: %w", err)
+			if attempt == 2 {
+				return engine.DirectorPlan{}, lastErr
+			}
+			truncated := cleaned
+			if len(truncated) > 400 {
+				truncated = truncated[:400] + "..."
+			}
+			reminder := "Previous response could not be parsed as JSON. Respond again with ONLY valid JSON matching {event_id, event_name, guidance, choices:[{label, archetype, base_cost:{time,fatigue,hunger,thirst}, base_risk}]}."
+			if truncated != "" {
+				reminder += " Raw response was: ```" + truncated + "```"
+			}
+			messages = append(messages, dsMessage{Role: "user", Content: reminder})
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return engine.DirectorPlan{}, lastErr
 	}
 	if len(resp.Choices) < 2 || len(resp.Choices) > 6 {
 		return engine.DirectorPlan{}, fmt.Errorf("director returned %d choices", len(resp.Choices))

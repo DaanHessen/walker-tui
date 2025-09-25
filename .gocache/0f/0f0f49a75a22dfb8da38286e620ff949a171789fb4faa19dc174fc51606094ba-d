@@ -1,7 +1,0 @@
-./conditions.go
-./custom.go
-./enums.go
-./events.go
-./prng.go
-./scene.go
-./state.go
