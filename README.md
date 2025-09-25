@@ -76,9 +76,12 @@ Zero Point is built in Go with a PostgreSQL backend and uses the Bubble Tea fram
 ## License
 
 ```
-She like to party like it's 1999
-Ayy, girl, don't be playin' with my–
-Now is not the time
-It's closin' time, what you want? Nevermind
-Hurry up, call the cut, don't be playin' 'round this time
+Copyright (c) Daan Hessen 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to use, copy, modify, and distribute the Software for non-commercial purposes only, subject to the following conditions:
+
+1. The above copyright notice and this permission notice shall be included
+   in all copies or substantial portions of the Software.
+2. Commercial use of this Software is prohibited without explicit written
+   permission from the author.
 ```
