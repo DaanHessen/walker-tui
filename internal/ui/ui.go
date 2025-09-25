@@ -92,9 +92,7 @@ func defaultTips() []string {
 }
 
 type styleSet struct {
-	canvas         lipgloss.Style
 	title          lipgloss.Style
-	subtitle       lipgloss.Style
 	topBar         lipgloss.Style
 	bottomBar      lipgloss.Style
 	menuBox        lipgloss.Style
@@ -102,7 +100,6 @@ type styleSet struct {
 	menuItemActive lipgloss.Style
 	scene          lipgloss.Style
 	sidebar        lipgloss.Style
-	panel          lipgloss.Style
 	accent         lipgloss.Style
 	muted          lipgloss.Style
 	borderColor    lipgloss.Color
