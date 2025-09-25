@@ -3,10 +3,10 @@ package text
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"regexp"
 	"strings"
@@ -39,19 +39,21 @@ func (m *MinimalFallbackNarrator) Scene(ctx context.Context, st any) (string, er
 	tod := grab("time_of_day")
 	weather := grab("weather")
 	season := grab("season")
-	lad := grab("lad")
-	worldDay := grab("world_day")
-	infected := grab("infected_present")
+	// world day / LAD are intentionally not surfaced in fallback text to avoid meta leak
+	infectedPresent := false
+	if v, ok := state["infected_present"]; ok {
+		infectedPresent = v == true || strings.EqualFold(fmt.Sprintf("%v", v), "true")
+	}
 	inv := "limited supplies"
 	if invMap, ok := state["inventory"].(engine.Inventory); ok {
 		inv = fmt.Sprintf("%.1fd food, %.1fL water", invMap.FoodDays, invMap.WaterLiters)
 	}
 	parts = append(parts, fmt.Sprintf("You are in %s this %s. The %s weather in %s feels typical for %s.", region, tod, weather, season, season))
-	parts = append(parts, fmt.Sprintf("World day %s; local arrival day threshold %s.", worldDay, lad))
-	if infected == "true" || infected == "1" || strings.EqualFold(fmt.Sprintf("%v", infected), "true") {
-		parts = append(parts, "Infected activity is now a possibility; you stay aware of movement and sound.")
+	if infectedPresent {
+		parts = append(parts, "Activity in the open has become risky; you keep distance and watch lines of sight.")
 	} else {
-		parts = append(parts, "Open areas remain unnervingly quiet; no infected are visible yet.")
+		// Avoid mentioning banned words pre-arrival; keep it neutral.
+		parts = append(parts, "Open spaces remain unnervingly quiet; streets and lots show little movement.")
 	}
 	parts = append(parts, fmt.Sprintf("Your current provisions are %s.", inv))
 	parts = append(parts, "You weigh immediate needs against risk.")
@@ -81,6 +83,10 @@ func (m *MinimalFallbackNarrator) Outcome(ctx context.Context, st any, ch any, u
 		} else {
 			segs = append(segs, "Your mood dips.")
 		}
+	}
+	// Ensure at least three sentences in fallback outcome
+	if len(segs) < 3 {
+		segs = append(segs, "You take stock of your condition and surroundings.")
 	}
 	segs = append(segs, "You reassess your immediate options.")
 	return strings.Join(segs, " "), nil
@@ -162,7 +168,11 @@ func (d *deepSeekNarrator) call(ctx context.Context, st any, ch any, up any, isS
 			{Role: "user", Content: combined},
 		}
 	}
-	reqBody, _ := json.Marshal(dsRequest{Model: "deepseek-reasoner", Messages: messages})
+	maxTok := 600
+	if !isScene {
+		maxTok = 400
+	}
+	reqBody, _ := json.Marshal(dsRequest{Model: "deepseek-reasoner", Messages: messages, MaxTokens: maxTok})
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		select {
@@ -289,15 +299,35 @@ func sanitizeState(st any) map[string]any {
 
 func backoff(attempt int) { time.Sleep(time.Duration(200+attempt*250) * time.Millisecond) }
 
-// Utility deterministic sampling (used by fallback maybe later)
-func sample[T any](r *rand.Rand, in []T, n int) []T {
-	if n > len(in) {
-		n = len(in)
+func hashPayload(payload any) ([]byte, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
 	}
-	out := make([]T, 0, n)
-	perm := r.Perm(len(in))
-	for i := 0; i < n; i++ {
-		out = append(out, in[perm[i]])
+	sum := sha256.Sum256(data)
+	return sum[:], nil
+}
+
+func SceneCacheKey(state any) ([]byte, error) {
+	return hashPayload(map[string]any{
+		"kind":  "scene",
+		"state": state,
+	})
+}
+
+func OutcomeCacheKey(state any, choice engine.Choice, delta engine.Stats) ([]byte, error) {
+	payload := map[string]any{
+		"kind":  "outcome",
+		"state": state,
+		"choice": map[string]any{
+			"id":        choice.ID,
+			"label":     choice.Label,
+			"archetype": choice.Archetype,
+			"cost":      choice.Cost,
+			"risk":      choice.Risk,
+			"custom":    choice.Custom,
+		},
+		"delta": delta,
 	}
-	return out
+	return hashPayload(payload)
 }

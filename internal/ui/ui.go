@@ -2,13 +2,13 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -33,19 +33,24 @@ const (
 	viewTimeline    = "timeline"
 )
 
+var seedEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+
 type model struct {
-	ctx      context.Context
-	world    *engine.World
-	survivor engine.Survivor
-	narrator text.Narrator
-	md       string
+	ctx          context.Context
+	world        *engine.World
+	survivor     engine.Survivor
+	runSeed      engine.RunSeed
+	rulesVersion string
+	narrator     text.Narrator
+	md           string
 	// sceneRendered: current scene markdown (no appended choices)
 	sceneRendered string
+	sceneText     string
 	// accumulated timeline (previous scenes+outcomes)
-	timeline string
-	styles   struct{ title lipgloss.Style }
-	choices  []engine.Choice
-	rng      *rand.Rand
+	timeline     string
+	styles       struct{ title lipgloss.Style }
+	choices      []engine.Choice
+	currentEvent *engine.EventContext
 	// persistence
 	db           *store.DB
 	runID        uuid.UUID
@@ -69,7 +74,8 @@ type model struct {
 	// pre-run configuration
 	preRunScarcity bool
 	preRunDensity  string
-	preRunSeed     int64
+	preRunSeed     engine.RunSeed
+	preRunSeedText string
 
 	// archive browser
 	archiveIndex  int
@@ -86,19 +92,55 @@ type model struct {
 	timelineScroll int
 }
 
+func randomSeedText() string {
+	buf := make([]byte, 15)
+	if _, err := rand.Read(buf); err != nil {
+		return "fallback-seed"
+	}
+	return strings.ToLower(seedEncoding.EncodeToString(buf))
+}
+
+func (m *model) choiceStream(label string) *engine.Stream {
+	return m.world.Seed.Stream(fmt.Sprintf("day:%d:turn:%d:%s", m.world.CurrentDay, m.turn, label))
+}
+
+func (m *model) survivorStream(index int) *engine.Stream {
+	return m.runSeed.Stream(fmt.Sprintf("survivor#%d", index))
+}
+
+func (m *model) loadEventHistory(tx *gorm.DB) (engine.EventHistory, error) {
+	repo := store.NewEventRepo(m.db)
+	return repo.LoadHistory(m.ctx, tx, m.runID)
+}
+
 // initialModel boots to main menu; game state seeded but not persisted until New Game selected.
 func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg util.Config) model {
-	w := engine.NewWorld(cfg.Seed)
-	r := engine.RNG(cfg.Seed)
-	s := engine.NewFirstSurvivor(r, w.CurrentDay, w.OriginSite)
+	runSeed, err := engine.NewRunSeed(cfg.SeedText)
+	if err != nil {
+		runSeed, _ = engine.NewRunSeed("fallback-seed")
+	}
+	w := engine.NewWorld(runSeed, cfg.RulesVersion)
+	s := engine.NewFirstSurvivor(runSeed.Stream("survivor#0"), w.OriginSite)
 	w.CurrentDay = s.Environment.WorldDay
-	m := model{ctx: ctx, world: w, survivor: s, narrator: narrator, db: db, debugLAD: cfg.DebugLAD}
+	m := model{
+		ctx:          ctx,
+		world:        w,
+		survivor:     s,
+		runSeed:      runSeed,
+		rulesVersion: cfg.RulesVersion,
+		narrator:     narrator,
+		db:           db,
+		debugLAD:     cfg.DebugLAD,
+	}
 	m.styles.title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	m.rng = engine.RNG(cfg.Seed)
 	m.view = viewMainMenu
 	m.preRunScarcity = false
-	m.preRunDensity = "standard"
-	m.preRunSeed = cfg.Seed
+	m.preRunDensity = cfg.TextDensity
+	if m.preRunDensity == "" {
+		m.preRunDensity = "standard"
+	}
+	m.preRunSeed = runSeed
+	m.preRunSeedText = runSeed.Text
 	return m
 }
 
@@ -106,11 +148,17 @@ func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg
 func (m *model) bootstrapPersistence() error {
 	runRepo := store.NewRunRepo(m.db)
 	survRepo := store.NewSurvivorRepo(m.db)
-	run, err := runRepo.Create(m.ctx, m.world.OriginSite, m.world.Seed)
+	run, err := runRepo.CreateWithSeed(m.ctx, m.world.OriginSite, m.preRunSeedText, m.rulesVersion)
 	if err != nil {
 		return err
 	}
 	m.runID = run.ID
+	// Mix runID and rules into runSeed for per-run uniqueness (post-persist)
+	m.runSeed = m.runSeed.WithRunContext(m.runID.String(), m.rulesVersion)
+	// Ensure world streams also use the mixed seed
+	if m.world != nil {
+		m.world.Seed = m.runSeed
+	}
 	sid, err := survRepo.Create(m.ctx, m.runID, m.survivor)
 	if err != nil {
 		return err
@@ -127,13 +175,20 @@ func (m *model) bootstrapPersistence() error {
 
 // startNewGame persists and enters scene view.
 func (m *model) startNewGame() {
-	// apply pre-run seed settings (reseed world + rng if user changed)
-	m.world.Seed = m.preRunSeed
-	m.rng = engine.RNG(m.preRunSeed)
-	// recreate first survivor with potentially new seed
-	r := engine.RNG(m.preRunSeed)
-	m.survivor = engine.NewFirstSurvivor(r, m.world.CurrentDay, m.world.OriginSite)
+	seed, err := engine.NewRunSeed(strings.TrimSpace(m.preRunSeedText))
+	if err != nil {
+		m.md = "Invalid seed string"
+		return
+	}
+	m.preRunSeed = seed
+	m.runSeed = seed
+	m.world = engine.NewWorld(seed, m.rulesVersion)
+	m.survivor = engine.NewFirstSurvivor(seed.Stream("survivor#0"), m.world.OriginSite)
 	m.world.CurrentDay = m.survivor.Environment.WorldDay
+	m.turn = 0
+	m.deaths = 0
+	m.scenesToday = 0
+	m.timeline = ""
 	if err := m.bootstrapPersistence(); err != nil {
 		m.md = "Failed to start new game: " + err.Error()
 	} else {
@@ -149,32 +204,80 @@ func (m *model) continueGame() {
 		m.md = "No run to continue"
 		return
 	}
+	runSeed, err := engine.NewRunSeed(run.SeedText)
+	if err != nil {
+		m.md = "Run seed invalid"
+		return
+	}
+	// Mix in persisted runID and rules for this resumed run
+	runSeed = runSeed.WithRunContext(run.ID.String(), run.RulesVersion)
+	m.preRunSeedText = run.SeedText
+	m.preRunSeed = runSeed
+	m.runSeed = runSeed
+	m.rulesVersion = run.RulesVersion
+	m.world = &engine.World{
+		OriginSite:   run.OriginSite,
+		Seed:         runSeed,
+		RulesVersion: m.rulesVersion,
+		CurrentDay:   run.CurrentDay,
+	}
 	sr := store.NewSurvivorRepo(m.db)
 	surv, sid, err := sr.GetAliveSurvivor(m.ctx, run.ID)
 	if err != nil {
 		m.md = "No alive survivor"
 		return
 	}
-	m.world.Seed = run.Seed
-	m.world.OriginSite = run.OriginSite
-	m.world.CurrentDay = run.CurrentDay
 	m.survivor = surv
 	m.survivorID = sid
 	m.runID = run.ID
+	m.turn = 0
+	m.deaths = 0
+	m.scenesToday = 0
 	m.refreshSettings()
-	_ = m.newSceneTx()
+	if err := m.newSceneTx(); err != nil {
+		m.md = "Failed to build scene: " + err.Error()
+		return
+	}
 	m.view = viewScene
 }
 
 // newSceneTx inserts scene + choices transactionally, renders markdown.
 func (m *model) newSceneTx() error {
 	return m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
-		m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+		history, err := m.loadEventHistory(tx)
+		if err != nil {
+			return err
+		}
+		choices, eventCtx, err := engine.GenerateChoices(m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+		if err != nil {
+			return err
+		}
+		m.choices = choices
+		m.currentEvent = eventCtx
 		m.customEnabled = true
 		m.customStatus = ""
 		// cooldown check will happen in handleCustomAction
 		state := m.survivor.NarrativeState()
-		md, _ := m.narrator.Scene(m.ctx, state)
+		cacheRepo := store.NewNarrationCacheRepo(m.db)
+		var md string
+		var sceneHash []byte
+		if h, err := text.SceneCacheKey(state); err == nil {
+			sceneHash = h
+			if cached, ok, err := cacheRepo.Get(m.ctx, tx, m.runID, "scene", h); err == nil && ok {
+				md = cached
+			}
+		}
+		if md == "" {
+			generated, err := m.narrator.Scene(m.ctx, state)
+			if err != nil {
+				fallback := text.NewMinimalFallbackNarrator()
+				generated, _ = fallback.Scene(m.ctx, state)
+			}
+			md = generated
+			if sceneHash != nil {
+				_ = cacheRepo.Put(m.ctx, tx, m.runID, "scene", sceneHash, md)
+			}
+		}
 		sceneRepo := store.NewSceneRepo(m.db)
 		choiceRepo := store.NewChoiceRepo(m.db)
 		sceneID, err := sceneRepo.Insert(m.ctx, tx, m.runID, m.survivorID, m.world.CurrentDay, "day", m.survivor.Environment.LAD, md)
@@ -290,7 +393,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "2":
 				m.preRunDensity = cycleDensityLocal(m.preRunDensity)
 			case "3":
-				m.preRunSeed = time.Now().UnixNano()
+				text := randomSeedText()
+				m.preRunSeedText = text
+				if seed, err := engine.NewRunSeed(text); err == nil {
+					m.preRunSeed = seed
+				}
 			case "4", "esc":
 				m.view = viewMainMenu
 			}
@@ -326,24 +433,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		switch k {
-		case "tab":
-			m.cyclePrimaryViews()
-		case "l":
-			m.view = viewLog
-			m.refreshLogs()
+        switch k {
+        case "tab":
+            m.cyclePrimaryViews()
+        case "l":
+            m.view = viewLog
+            m.refreshLogs()
 		case "a":
 			m.view = viewArchive
 			m.refreshArchives()
 		case "s":
 			m.view = viewSettings
 			m.refreshSettings()
-		case "?":
-			if m.view == viewHelp {
-				m.view = viewScene
-			} else {
-				m.view = viewHelp
-			}
+        case "m":
+            m.view = viewMainMenu
+        case "?":
+            if m.view == viewHelp {
+                m.view = viewScene
+            } else {
+                m.view = viewHelp
+            }
 		case "t":
 			if m.view == viewSettings {
 				m.toggleScarcity()
@@ -437,20 +546,36 @@ func (m *model) renderSceneLayout() string {
 }
 
 func (m *model) renderTopBar() string {
-	name := m.survivor.Name
-	day := fmt.Sprintf("Day %d", m.survivor.Environment.WorldDay)
-	lad := fmt.Sprintf("LAD %d", m.survivor.Environment.LAD)
-	if m.debugLAD {
-		lad += fmt.Sprintf(" inf:%v", m.survivor.Environment.Infected)
+	// Left: ZERO POINT • Region • Local Date & Time TZ • Season • Temp Band
+	// Right: World Day and optional [LAD:n] when debug
+	leftParts := []string{
+		"ZERO POINT",
+		m.survivor.Region,
 	}
-	loc := fmt.Sprintf("%s/%s", m.survivor.Region, m.survivor.Location)
-	parts := []string{"Zero Point", name, day, lad, loc, m.survivor.Environment.TimeOfDay}
-	bar := strings.Join(parts, " | ")
+	// Local time string
+	locStr := engine.NarrativeLocalTime(m.survivor)
+	leftParts = append(leftParts, locStr)
+	leftParts = append(leftParts, string(m.survivor.Environment.Season))
+	leftParts = append(leftParts, string(m.survivor.Environment.TempBand))
+	left := strings.Join(leftParts, " • ")
+	right := fmt.Sprintf("Day %d", m.survivor.Environment.WorldDay)
+	if m.debugLAD {
+		right += fmt.Sprintf("  [LAD:%d]", m.survivor.Environment.LAD)
+	}
+	w := m.width
+	if w <= 0 {
+		w = 100
+	}
+	gap := w - len(left) - len(right)
+	if gap < 1 {
+		gap = 1
+	}
+	bar := left + strings.Repeat(" ", gap) + right
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render(bar)
 }
 
 func (m *model) renderBottomBar() string {
-	left := "[1-6] choose  [Enter] commit custom  [Tab] cycle  [L] logs  [A] archive  [S] settings  [?] help  [Q] quit"
+    left := "[1-6] choose  [Enter] commit custom  [Tab] cycle  [L] log  [A] archive  [S] settings  [M] menu  [?] help  [Q] quit"
 	cust := m.customInput
 	if !m.customEnabled {
 		cust = "(disabled)"
@@ -478,24 +603,62 @@ func (m *model) renderBottomBar() string {
 
 // Build main scene area (scene + choices)
 func (m *model) buildMainScene() string {
-	var b strings.Builder
-	b.WriteString("# SCENE\n")
-	b.WriteString(m.sceneRendered)
-	b.WriteString("\n\n# CHOICES\n")
-	for _, c := range m.choices {
-		b.WriteString(fmt.Sprintf("[%d] %s | Cost:%s | Risk:%s\n", c.Index+1, c.Label, formatCost(c.Cost), c.Risk))
-	}
-	return b.String()
+    var b strings.Builder
+    // 1) Character Overview (compact)
+    s := m.survivor
+    b.WriteString("# CHARACTER OVERVIEW\n")
+    b.WriteString(fmt.Sprintf("%s, %d — %s — %s (%d)\n\n", s.Name, s.Age, s.Background, s.Group, s.GroupSize))
+    // 2) Skills (compact)
+    b.WriteString("# SKILLS\n")
+    if len(s.Skills) == 0 {
+        b.WriteString("(none)\n\n")
+    } else {
+        names := make([]string, 0, len(s.Skills))
+        vals := map[string]int{}
+        for k, v := range s.Skills {
+            names = append(names, string(k))
+            vals[string(k)] = v
+        }
+        sort.Strings(names)
+        for i, name := range names {
+            if i > 0 { b.WriteString(", ") }
+            b.WriteString(fmt.Sprintf("%s:%d", abbrev(name), vals[name]))
+        }
+        b.WriteString("\n\n")
+    }
+    // 3) STATS (compact)
+    b.WriteString("# STATS\n")
+    b.WriteString(fmt.Sprintf("H %s %d  Hu %s %d  Th %s %d  Fa %s %d  Mo %s %d\n\n",
+        bar(s.Stats.Health), s.Stats.Health,
+        bar(s.Stats.Hunger), s.Stats.Hunger,
+        bar(s.Stats.Thirst), s.Stats.Thirst,
+        bar(s.Stats.Fatigue), s.Stats.Fatigue,
+        bar(s.Stats.Morale), s.Stats.Morale,
+    ))
+    // 4) INVENTORY (compact)
+    b.WriteString("# INVENTORY\n")
+    inv := s.Inventory
+    b.WriteString(fmt.Sprintf("Weapons %d  Food %.1fd  Water %.1fL  Med %d  Tools %d\n\n",
+        len(inv.Weapons), inv.FoodDays, inv.WaterLiters, len(inv.Medical), len(inv.Tools)))
+    // 5) SCENE
+    b.WriteString("# SCENE\n")
+    b.WriteString(m.sceneRendered)
+    b.WriteString("\n\n# CHOICES\n")
+    for _, c := range m.choices {
+        b.WriteString(fmt.Sprintf("[%d] %s | Cost:%s | Risk:%s\n", c.Index+1, c.Label, formatCost(c.Cost), c.Risk))
+    }
+    return b.String()
 }
 
 // Sidebar condensed sections
 func (m *model) buildSidebar() string {
-	s := m.survivor
-	var b strings.Builder
-	b.WriteString("CHARACTER\n")
-	b.WriteString(fmt.Sprintf("%s (%s)\n", s.Name, s.Background))
-	b.WriteString(fmt.Sprintf("Age %d  %s\n", s.Age, s.Environment.TimeOfDay))
-	b.WriteString(fmt.Sprintf("%s\n\n", s.Location))
+    s := m.survivor
+    var b strings.Builder
+    b.WriteString("CHARACTER\n")
+    b.WriteString(fmt.Sprintf("%s (%s)\n", s.Name, s.Background))
+    b.WriteString(fmt.Sprintf("Age %d  Group %s(%d)\n", s.Age, s.Group, s.GroupSize))
+    b.WriteString(fmt.Sprintf("Body %s  ToD %s\n", s.BodyTemp, s.Environment.TimeOfDay))
+    b.WriteString(fmt.Sprintf("%s\n\n", s.Location))
 	// Stats bars condensed
 	b.WriteString("STATS\n")
 	b.WriteString(sb("H", s.Stats.Health))
@@ -503,10 +666,14 @@ func (m *model) buildSidebar() string {
 	b.WriteString(sb("Th", s.Stats.Thirst))
 	b.WriteString(sb("Fa", s.Stats.Fatigue))
 	b.WriteString(sb("Mo", s.Stats.Morale) + "\n\n")
-	// Inventory
-	inv := s.Inventory
-	b.WriteString("INV\n")
-	b.WriteString(fmt.Sprintf("Food %.1fd\nWater %.1fL\nMed %d  Wpn %d\n\n", inv.FoodDays, inv.WaterLiters, len(inv.Medical), len(inv.Weapons)))
+    // Inventory
+    inv := s.Inventory
+    b.WriteString("INV\n")
+    b.WriteString(fmt.Sprintf("Weapons %d\n", len(inv.Weapons)))
+    b.WriteString(fmt.Sprintf("Food %.1fd  Water %.1fL\n", inv.FoodDays, inv.WaterLiters))
+    b.WriteString(fmt.Sprintf("Medical %d  Tools %d\n", len(inv.Medical), len(inv.Tools)))
+    if inv.Memento != "" { b.WriteString("Memento ✓\n") }
+    b.WriteString("\n")
 	// Conditions
 	b.WriteString("COND\n")
 	if len(s.Conditions) == 0 {
@@ -517,7 +684,18 @@ func (m *model) buildSidebar() string {
 		}
 		b.WriteString("\n\n")
 	}
-	// Skills grid all
+    // Traits
+    b.WriteString("TRAITS\n")
+    if len(s.Traits) == 0 {
+        b.WriteString("(none)\n\n")
+    } else {
+        for i, t := range s.Traits {
+            if i > 0 { b.WriteString(", ") }
+            b.WriteString(string(t))
+        }
+        b.WriteString("\n\n")
+    }
+    // Skills grid all
 	b.WriteString("SKILLS\n")
 	if len(s.Skills) == 0 {
 		b.WriteString("(none)\n")
@@ -542,7 +720,7 @@ func sb(label string, v int) string { return fmt.Sprintf("%-2s %s %3d\n", label,
 // Main menu rendering.
 func (m *model) renderMainMenu() string {
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).Width(50)
-	content := "ZERO POINT — MAIN MENU\n\n[1] New Game\n[2] Continue Game\n[3] World Settings\n[4] Survivor Archive (TBD)\n[5] About / Rules\n\nQ Quit"
+    content := "ZERO POINT — MAIN MENU\n\n[1] New Game\n[2] Continue Game\n[3] World Settings\n[4] Survivor Archive\n[5] About / Rules\n\nQ Quit"
 	return box.Render(content)
 }
 
@@ -552,7 +730,7 @@ func (m *model) renderWorldConfig() string {
 	if m.preRunScarcity {
 		scar = "On"
 	}
-	content := fmt.Sprintf("WORLD SETTINGS (Pre-Run)\n\nSeed: %d\nScarcity: %s (1 toggle)\nText Density: %s (2 cycle)\n[3] Regenerate Seed\n[4] Back\n", m.preRunSeed, scar, m.preRunDensity)
+	content := fmt.Sprintf("WORLD SETTINGS (Pre-Run)\n\nSeed: %s\nScarcity: %s (1 toggle)\nText Density: %s (2 cycle)\n[3] Regenerate Seed\n[4] Back\n", m.preRunSeedText, scar, m.preRunDensity)
 	return box.Render(content)
 }
 
@@ -628,21 +806,32 @@ func (m *model) cycleDensity() {
 }
 
 func (m *model) forceRegenerateChoices() {
-	m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+	history, err := m.loadEventHistory(nil)
+	if err != nil {
+		m.md = "Choice generation failed: " + err.Error()
+		return
+	}
+	choices, eventCtx, err := engine.GenerateChoices(m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+	if err != nil {
+		m.md = "Choice generation failed: " + err.Error()
+		return
+	}
+	m.choices = choices
+	m.currentEvent = eventCtx
 	m.md = m.renderSceneLayout()
 }
 
 func (m *model) handleCustomAction() {
 	// enforce 2-scene cooldown since last custom (stored turn number)
 	if m.survivor.Meters != nil {
-		if last, ok := m.survivor.Meters[engine.MeterCustomLastTurn]; ok {
-			if m.turn-last < 2 { // need at least 2 full scenes gap
-				m.customStatus = "cooldown"
-				m.customEnabled = false
-				m.md = m.renderSceneLayout()
-				return
-			}
-		}
+            if last, ok := m.survivor.Meters[engine.MeterCustomLastTurn]; ok {
+                if m.turn-last < 2 { // need at least 2 full scenes gap
+                    m.customStatus = "Custom action unavailable now"
+                    m.customEnabled = false
+                    m.md = m.renderSceneLayout()
+                    return
+                }
+            }
 	}
 	choice, ok, reason := engine.ValidateCustomAction(m.customInput, m.survivor)
 	if !ok {
@@ -651,7 +840,10 @@ func (m *model) handleCustomAction() {
 		m.md = m.renderSceneLayout()
 		return
 	}
-	_ = m.resolveChoiceTx(choice)
+	if err := m.resolveChoiceTx(choice); err != nil {
+		m.md = "Resolution failed: " + err.Error()
+		return
+	}
 	m.customInput = ""
 	m.customStatus = ""
 }
@@ -662,16 +854,40 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 	var outcomeMD string
 	prevTurn := m.turn
 	var deathCause string
+	eventCtx := m.currentEvent
+	m.currentEvent = nil
+	eventRepo := store.NewEventRepo(m.db)
+	cacheRepo := store.NewNarrationCacheRepo(m.db)
 	err := m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
-		delta := engine.ApplyChoice(&m.survivor, c, engine.Difficulty(m.settings.Difficulty), m.turn)
+		deltaStream := m.choiceStream("delta").Child(fmt.Sprintf("choice:%s", c.ID))
+		res := engine.ApplyChoice(&m.survivor, c, engine.Difficulty(m.settings.Difficulty), m.turn, deltaStream)
 		upRepo := store.NewUpdateRepo(m.db)
 		outRepo := store.NewOutcomeRepo(m.db)
 		survRepo := store.NewSurvivorRepo(m.db)
 		logRepo := store.NewLogRepo(m.db)
-		if _, err := upRepo.Insert(m.ctx, tx, m.sceneID, delta, m.survivor.Conditions); err != nil {
+		if _, err := upRepo.Insert(m.ctx, tx, m.sceneID, res.Delta, res.Added, res.Removed); err != nil {
 			return err
 		}
-		outMD, _ := m.narrator.Outcome(m.ctx, m.survivor.NarrativeState(), c, delta)
+		stateAfter := m.survivor.NarrativeState()
+		var outMD string
+		var outcomeHash []byte
+		if h, err := text.OutcomeCacheKey(stateAfter, c, res.Delta); err == nil {
+			outcomeHash = h
+			if cached, ok, err := cacheRepo.Get(m.ctx, tx, m.runID, "outcome", h); err == nil && ok {
+				outMD = cached
+			}
+		}
+		if outMD == "" {
+			generated, err := m.narrator.Outcome(m.ctx, stateAfter, c, res.Delta)
+			if err != nil {
+				fallback := text.NewMinimalFallbackNarrator()
+				generated, _ = fallback.Outcome(m.ctx, stateAfter, c, res.Delta)
+			}
+			outMD = generated
+			if outcomeHash != nil {
+				_ = cacheRepo.Put(m.ctx, tx, m.runID, "outcome", outcomeHash, outMD)
+			}
+		}
 		if _, err := outRepo.Insert(m.ctx, tx, m.sceneID, outMD); err != nil {
 			return err
 		}
@@ -681,7 +897,36 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 		outcomeMD = outMD
 		aliveAfter = m.survivor.Alive
 		recap := buildRecap(outMD)
-		_, _ = logRepo.Insert(m.ctx, tx, m.runID, m.survivorID, map[string]any{"turn": prevTurn, "choice": c.Label, "delta": delta}, recap)
+		_, _ = logRepo.Insert(m.ctx, tx, m.runID, m.survivorID, map[string]any{
+			"turn":               prevTurn,
+			"choice":             c.Label,
+			"delta":              res.Delta,
+			"conditions_added":   res.Added,
+			"conditions_removed": res.Removed,
+		}, recap)
+		if eventCtx != nil {
+			cooldown := prevTurn + eventCtx.Event.CooldownScenes + 1
+			arcID := ""
+			arcStep := 0
+			if eventCtx.Event.Arc != nil {
+				arcID = eventCtx.Event.Arc.ID
+				arcStep = eventCtx.Event.Arc.Step
+			}
+			rec := store.EventInstanceRecord{
+				RunID:              m.runID,
+				SurvivorID:         m.survivorID,
+				EventID:            eventCtx.Event.ID,
+				WorldDay:           m.world.CurrentDay,
+				SceneIdx:           prevTurn,
+				CooldownUntilScene: cooldown,
+				ArcID:              arcID,
+				ArcStep:            arcStep,
+				OnceFired:          eventCtx.Event.OncePerRun,
+			}
+			if err := eventRepo.Insert(m.ctx, tx, rec); err != nil {
+				return err
+			}
+		}
 		if !aliveAfter {
 			deathCause = classifyDeath(m.survivor)
 			archRepo := store.NewArchiveRepo(m.db)
@@ -737,7 +982,9 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 		rr := store.NewRunRepo(m.db)
 		_ = rr.UpdateDay(m.ctx, nil, m.runID, m.world.CurrentDay)
 		m.timeline += "\n\n=== Day advanced to " + fmt.Sprint(m.world.CurrentDay) + " ==="
-		_ = m.newSceneTx()
+		if err := m.newSceneTx(); err != nil {
+			return err
+		}
 	}
 	m.md = m.renderSceneLayout()
 	return nil
@@ -745,8 +992,7 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 
 func (m *model) spawnReplacementTx() error {
 	return m.db.WithTx(m.ctx, func(tx *gorm.DB) error {
-		r := engine.RNG(m.world.Seed + int64(m.deaths) + 1)
-		newSurv := engine.NewGenericSurvivor(r, m.world.CurrentDay, m.world.OriginSite)
+		newSurv := engine.NewGenericSurvivor(m.survivorStream(m.deaths+1), m.world.CurrentDay, m.world.OriginSite)
 		survRepo := store.NewSurvivorRepo(m.db)
 		sid, err := survRepo.Create(m.ctx, m.runID, newSurv)
 		if err != nil {
@@ -754,9 +1000,37 @@ func (m *model) spawnReplacementTx() error {
 		}
 		m.survivor = newSurv
 		m.survivorID = sid
-		m.choices = engine.GenerateChoices(m.rng, m.survivor, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+		history, err := m.loadEventHistory(tx)
+		if err != nil {
+			return err
+		}
+		choices, eventCtx, err := engine.GenerateChoices(m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+		if err != nil {
+			return err
+		}
+		m.choices = choices
+		m.currentEvent = eventCtx
 		state := m.survivor.NarrativeState()
-		md, _ := m.narrator.Scene(m.ctx, state)
+		cacheRepo := store.NewNarrationCacheRepo(m.db)
+		var md string
+		var sceneHash []byte
+		if h, err := text.SceneCacheKey(state); err == nil {
+			sceneHash = h
+			if cached, ok, err := cacheRepo.Get(m.ctx, tx, m.runID, "scene", h); err == nil && ok {
+				md = cached
+			}
+		}
+		if md == "" {
+			generated, err := m.narrator.Scene(m.ctx, state)
+			if err != nil {
+				fallback := text.NewMinimalFallbackNarrator()
+				generated, _ = fallback.Scene(m.ctx, state)
+			}
+			md = generated
+			if sceneHash != nil {
+				_ = cacheRepo.Put(m.ctx, tx, m.runID, "scene", sceneHash, md)
+			}
+		}
 		sceneRepo := store.NewSceneRepo(m.db)
 		choiceRepo := store.NewChoiceRepo(m.db)
 		sceneID, err := sceneRepo.Insert(m.ctx, tx, m.runID, m.survivorID, m.world.CurrentDay, "day", m.survivor.Environment.LAD, md)
@@ -796,13 +1070,13 @@ func (m *model) exportRun() {
 		b.WriteString("\n")
 	}
 	dir := filepath.Join(os.Getenv("HOME"), ".zero-point", "exports")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		m.exportStatus = "err-mkdir"
 		return
 	}
 	fname := fmt.Sprintf("run_%s.md", m.runID.String())
 	path := filepath.Join(dir, fname)
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		m.exportStatus = "err-write"
 		return
 	}
@@ -912,57 +1186,80 @@ func (m *model) renderArchive() string {
 }
 
 func (m *model) renderHelp() string {
-	return "ABOUT / RULES\n\nYou manage sequential survivors in the early outbreak (LAD gate)." +
-		" Maintain core needs (health, hunger, thirst, fatigue, morale). Infected risk only after Local Arrival Day." +
-		" Each turn: read scene, pick 1 action (1-6) or craft a concise custom verb phrase. Outcomes adjust stats and may cause death." +
-		" Death creates an archive card; a new survivor appears immediately.\n\nControls: 1-6 choose | Enter custom | Tab cycle views | L logs | A archive | S settings | E export | F6 LAD debug | Q quit.\n\nEsc returns from subviews."
+	return fmt.Sprintf("ABOUT / RULES\n\nSeed & Rules: %s • %s\n\nYou manage sequential survivors in the early outbreak (LAD gate)."+
+		" Maintain core needs (health, hunger, thirst, fatigue, morale). Infected risk only after Local Arrival Day."+
+		" Each turn: read scene, pick 1 action (1-6) or craft a concise custom verb phrase. Outcomes adjust stats and may cause death."+
+		" Death creates an archive card; a new survivor appears immediately.\n\nControls: 1-6 choose | Enter custom | Tab cycle views | L logs | A archive | S settings | E export | F6 LAD debug | Q quit.\n\nEsc returns from subviews.",
+		m.runSeed.Text, m.rulesVersion)
 }
 
 func (m *model) renderSettings() string {
-	return fmt.Sprintf("Settings\nScarcity: %v (t toggle)\nDensity: %s (d cycle)\nNarrator: %s (n toggle on/off)\nLanguage: %s (g cycle placeholder)\n", m.settings.Scarcity, m.settings.TextDensity, m.settings.Narrator, m.settings.Language)
+	return fmt.Sprintf("Settings\nSeed & Rules: %s • %s\nScarcity: %v (t toggle)\nDensity: %s (d cycle)\nNarrator: %s (n toggle on/off)\nLanguage: %s (g cycle placeholder)\n",
+		m.runSeed.Text, m.rulesVersion, m.settings.Scarcity, m.settings.TextDensity, m.settings.Narrator, m.settings.Language)
 }
 
-func (m *model) toggleNarrator() {
-	sr := store.NewSettingsRepo(m.db)
-	if err := sr.ToggleNarrator(m.ctx, m.runID); err == nil {
-		m.refreshSettings()
-		m.applyNarratorMode()
-	}
-}
+// --- Added implementations to fix missing methods ---
 
-func (m *model) applyNarratorMode() {
-	if m.settings.Narrator == "off" {
-		m.narrator = text.NewMinimalFallbackNarrator()
-	} else {
-		// Re-enable DeepSeek if key present
-		key := os.Getenv("DEEPSEEK_API_KEY")
-		if key != "" {
-			if ds, err := text.NewDeepSeekNarrator(key); err == nil {
-				m.narrator = text.WithFallback(ds, text.NewMinimalFallbackNarrator())
-			}
-		}
-	}
-}
-
-func (m *model) cycleLanguage() { /* placeholder for future i18n */ }
-
+// renderTimeline displays the accumulated scene+outcome timeline with simple scrolling.
 func (m *model) renderTimeline() string {
-	if m.timeline == "" {
-		return "TIMELINE\n(no entries yet)\nEsc to return"
-	}
+	title := "TIMELINE (PgUp/PgDn, Up/Down, Home/End, Esc back)"
 	lines := strings.Split(m.timeline, "\n")
-	if m.timelineScroll > len(lines)-1 {
-		m.timelineScroll = len(lines) - 1
+	w := m.width
+	if w <= 0 {
+		w = 100
 	}
-	height := m.height - 2
-	if height < 5 {
-		height = 5
+	h := m.height
+	if h <= 0 {
+		h = 30
+	}
+	avail := h - 2
+	if avail < 1 {
+		avail = len(lines)
 	}
 	start := m.timelineScroll
-	end := start + height
-	if end > len(lines) {
-		end = len(lines)
+	if start < 0 {
+		start = 0
 	}
-	view := strings.Join(lines[start:end], "\n")
-	return "TIMELINE (y to toggle, esc to return)\n" + view
+	maxStart := len(lines) - avail
+	if maxStart < 0 {
+		maxStart = 0
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+	m.timelineScroll = start
+	view := lines
+	if len(lines) > avail {
+		end := start + avail
+		if end > len(lines) {
+			end = len(lines)
+		}
+		view = lines[start:end]
+	}
+	return title + "\n" + strings.Join(view, "\n")
+}
+
+// toggleNarrator flips narrator setting between 'auto' and 'off' and refreshes settings.
+func (m *model) toggleNarrator() {
+	if m.runID == uuid.Nil {
+		return
+	}
+	sr := store.NewSettingsRepo(m.db)
+	_ = sr.ToggleNarrator(m.ctx, m.runID)
+	m.refreshSettings()
+}
+
+// cycleLanguage is a placeholder; persist a stable value or simple cycle.
+func (m *model) cycleLanguage() {
+	if m.runID == uuid.Nil {
+		return
+	}
+	next := "en"
+	// Placeholder: if more languages are supported in the future, cycle through them.
+	if m.settings.Language != "en" {
+		next = "en"
+	}
+	sr := store.NewSettingsRepo(m.db)
+	_ = sr.Upsert(m.ctx, m.runID, m.settings.Scarcity, m.settings.TextDensity, next, m.settings.Narrator, m.settings.Difficulty)
+	m.refreshSettings()
 }

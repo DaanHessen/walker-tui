@@ -1,17 +1,145 @@
 package engine
 
-import (
-	"math/rand"
-)
+import "fmt"
 
 // Choice mechanical representation (separate from rendered markdown line)
+type StatKey string
+
+const (
+	StatHealth  StatKey = "health"
+	StatHunger  StatKey = "hunger"
+	StatThirst  StatKey = "thirst"
+	StatFatigue StatKey = "fatigue"
+	StatMorale  StatKey = "morale"
+)
+
+type DeltaRange struct {
+	Min int
+	Max int
+}
+
+type ChoiceOutcome map[StatKey]DeltaRange
+
+type ChoiceEffect struct {
+	AddConditions    []Condition
+	RemoveConditions []Condition
+	MeterDeltas      map[Meter]int
+}
+
+func (e ChoiceEffect) Empty() bool {
+	return len(e.AddConditions) == 0 && len(e.RemoveConditions) == 0 && len(e.MeterDeltas) == 0
+}
+
+func mergeEffects(a, b ChoiceEffect) ChoiceEffect {
+	res := ChoiceEffect{}
+	res.AddConditions = append(res.AddConditions, a.AddConditions...)
+	res.AddConditions = append(res.AddConditions, b.AddConditions...)
+	res.RemoveConditions = append(res.RemoveConditions, a.RemoveConditions...)
+	res.RemoveConditions = append(res.RemoveConditions, b.RemoveConditions...)
+	if len(a.MeterDeltas) > 0 || len(b.MeterDeltas) > 0 {
+		res.MeterDeltas = make(map[Meter]int, len(a.MeterDeltas)+len(b.MeterDeltas))
+		for k, v := range a.MeterDeltas {
+			res.MeterDeltas[k] += v
+		}
+		for k, v := range b.MeterDeltas {
+			res.MeterDeltas[k] += v
+		}
+	}
+	return res
+}
+
+func applyChoiceEffect(s *Survivor, eff ChoiceEffect) (added []Condition, removed []Condition) {
+	if s == nil || eff.Empty() {
+		return nil, nil
+	}
+	if s.Meters == nil {
+		s.Meters = make(map[Meter]int)
+	}
+	for _, cond := range eff.AddConditions {
+		if addConditionIfAbsent(s, cond) {
+			added = append(added, cond)
+		}
+	}
+	for _, cond := range eff.RemoveConditions {
+		if removeConditionIfPresent(s, cond) {
+			removed = append(removed, cond)
+		}
+	}
+	if len(eff.MeterDeltas) > 0 {
+		for meter, delta := range eff.MeterDeltas {
+			v := s.Meters[meter] + delta
+			if v < 0 {
+				v = 0
+			}
+			if v > 100 {
+				v = 100
+			}
+			s.Meters[meter] = v
+		}
+	}
+	return added, removed
+}
+
+func survivorHasCondition(s Survivor, cond Condition) bool {
+	for _, existing := range s.Conditions {
+		if existing == cond {
+			return true
+		}
+	}
+	return false
+}
+
+func addConditionIfAbsent(s *Survivor, cond Condition) bool {
+	if s == nil || survivorHasCondition(*s, cond) {
+		return false
+	}
+	s.Conditions = append(s.Conditions, cond)
+	return true
+}
+
+func removeConditionIfPresent(s *Survivor, cond Condition) bool {
+	if s == nil {
+		return false
+	}
+	if len(s.Conditions) == 0 {
+		return false
+	}
+	rest := s.Conditions[:0]
+	removed := false
+	for _, existing := range s.Conditions {
+		if existing == cond {
+			removed = true
+			continue
+		}
+		rest = append(rest, existing)
+	}
+	s.Conditions = rest
+	return removed
+}
+
 type Choice struct {
-	Index     int
-	Label     string
-	Cost      Cost
-	Risk      RiskLevel
-	Delta     Stats // simple stat impact for prototype
-	Archetype string
+	Index       int
+	ID          string
+	Label       string
+	Cost        Cost
+	Risk        RiskLevel
+	Archetype   string
+	Outcome     ChoiceOutcome
+	Effects     ChoiceEffect
+	SourceEvent string
+	Custom      bool
+}
+
+type Resolution struct {
+	Delta   Stats
+	Added   []Condition
+	Removed []Condition
+}
+
+type conditionOutcome struct {
+	Delta   Stats
+	Added   []Condition
+	Removed []Condition
 }
 
 type Cost struct {
@@ -51,6 +179,21 @@ func riskFromScore(s int) RiskLevel {
 	return RiskHigh
 }
 
+func isHighExertionChoice(c Choice) bool {
+	if c.Archetype == "rest" || c.Archetype == "organize" {
+		return false
+	}
+	if c.Cost.Fatigue >= 6 {
+		return true
+	}
+	switch c.Archetype {
+	case "forage", "travel", "barricade", "scout":
+		return true
+	default:
+		return false
+	}
+}
+
 // classify archetype category for condition/difficulty modifiers
 func archetypeCategory(a string) string {
 	switch a {
@@ -84,15 +227,13 @@ func relevantSkill(a string) Skill {
 
 func adjustRisk(c *Choice, s Survivor, cfg choiceConfig) {
 	base := riskScore(c.Risk)
-	// skill mod
 	sk := relevantSkill(c.Archetype)
 	lvl := s.Skills[sk]
 	if lvl >= 4 {
-		base -= 1
+		base--
 	} else if lvl <= 1 {
-		base += 1
+		base++
 	}
-	// conditions mods
 	cat := archetypeCategory(c.Archetype)
 	has := func(cc Condition) bool {
 		for _, x := range s.Conditions {
@@ -103,26 +244,22 @@ func adjustRisk(c *Choice, s Survivor, cfg choiceConfig) {
 		return false
 	}
 	if has(ConditionBleeding) && cat == "physical" {
-		base += 1
+		base++
 	}
-	if has(ConditionDehydration) && (c.Archetype == "forage" || c.Archetype == "travel") {
-		base += 1
+	if has(ConditionFever) && (c.Archetype == "observe" || c.Archetype == "scout") {
+		base++
 	}
-	if has(ConditionFever) && (c.Archetype == "observe" || c.Archetype == "scout" || c.Archetype == "organize") {
-		base += 1
-	}
-	if has(ConditionHypothermia) && (c.Archetype == "observe" || c.Archetype == "forage") {
-		base += 1
+	if has(ConditionHypothermia) && (c.Archetype == "forage" || c.Archetype == "scout" || c.Archetype == "barricade") {
+		base++
 	}
 	if has(ConditionExhaustion) && cat == "physical" {
-		base += 1
+		base++
 	}
-	// difficulty mods
-	if cfg.difficulty == DifficultyEasy && (c.Archetype == "forage" || c.Archetype == "rest" || c.Archetype == "observe" || c.Archetype == "scout") {
-		base -= 1
+	if cfg.difficulty == DifficultyEasy && (c.Archetype == "forage" || c.Archetype == "rest" || c.Archetype == "scout") {
+		base--
 	}
-	if cfg.difficulty == DifficultyHard && (c.Archetype == "forage" || c.Archetype == "travel") {
-		base += 1
+	if cfg.difficulty == DifficultyHard && isHighExertionChoice(*c) {
+		base++
 	}
 	if base < 0 {
 		base = 0
@@ -133,220 +270,127 @@ func adjustRisk(c *Choice, s Survivor, cfg choiceConfig) {
 	c.Risk = riskFromScore(base)
 }
 
-// GenerateChoices returns a small deterministic set based on RNG and settings hints.
-func GenerateChoices(r *rand.Rand, s Survivor, opts ...ChoiceOption) []Choice {
+// GenerateChoices returns a deterministic set based on RNG and settings hints.
+func GenerateChoices(stream *Stream, s *Survivor, history EventHistory, sceneIdx int, opts ...ChoiceOption) ([]Choice, *EventContext, error) {
 	cfg := choiceConfig{}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	choices := []Choice{
-		{Index: 0, Label: "Forage nearby", Archetype: "forage", Cost: Cost{Time: 1, Fatigue: 5}, Risk: RiskLow, Delta: Stats{Hunger: -10, Thirst: -5, Fatigue: 5}},
-		{Index: 1, Label: "Rest and recover", Archetype: "rest", Cost: Cost{Time: 1}, Risk: RiskLow, Delta: Stats{Fatigue: -10, Morale: 2}},
+	ctx, onSelectEffect, err := SelectAndBuildChoices(stream.Child("event-selection"), s, cfg, history, sceneIdx)
+	if err != nil {
+		return nil, nil, err
 	}
-	// difficulty scaling pre-adjust (resource yield multipliers)
-	resMult := 1.0
-	switch cfg.difficulty {
-	case DifficultyEasy:
-		resMult = 1.2
-	case DifficultyHard:
-		resMult = 0.75
+	if !onSelectEffect.Empty() {
+		_, _ = applyChoiceEffect(s, onSelectEffect)
 	}
-	choices[0].Delta.Hunger = int(float64(choices[0].Delta.Hunger) * resMult)
-	choices[0].Delta.Thirst = int(float64(choices[0].Delta.Thirst) * resMult)
-	// Skill influence using existing skills (survival/navigation heuristics)
-	if v, ok := s.Skills[SkillSurvival]; ok && v >= 2 {
-		choices[0].Delta.Hunger = int(float64(choices[0].Delta.Hunger) * 1.3)
-		choices[0].Delta.Thirst = int(float64(choices[0].Delta.Thirst) * 1.25)
-	}
-	// Additional conditional choices
-	if r.Intn(100) < 40 {
-		choices = append(choices, Choice{Index: len(choices), Label: "Scout street", Archetype: "observe", Cost: Cost{Time: 1, Fatigue: 8}, Risk: RiskModerate, Delta: Stats{Fatigue: 5, Morale: 3}})
-	}
-	if v, ok := s.Skills[SkillNavigation]; ok && v >= 2 {
-		for i := range choices {
-			if choices[i].Label == "Scout street" {
-				choices[i].Delta.Morale += 1
-			}
-		}
-	}
-	if cfg.textDensity == "rich" && len(choices) < 4 {
-		choices = append(choices, Choice{Index: len(choices), Label: "Organize supplies", Archetype: "organize", Cost: Cost{Time: 1}, Risk: RiskLow, Delta: Stats{Morale: 2}})
-	}
-	// Infection gating – soften risks pre-arrival
-	if !cfg.infected {
-		for i := range choices {
-			if choices[i].Risk == RiskModerate {
-				choices[i].Risk = RiskLow
-			}
-		}
-	}
-	// Scarcity adjustments
-	if cfg.scarcity {
-		for i := range choices {
-			c := &choices[i]
-			if c.Delta.Hunger < 0 {
-				c.Delta.Hunger = int(float64(c.Delta.Hunger) * 0.6)
-			}
-			if c.Delta.Thirst < 0 {
-				c.Delta.Thirst = int(float64(c.Delta.Thirst) * 0.6)
-			}
-			if c.Delta.Fatigue < 0 {
-				c.Delta.Fatigue = int(float64(c.Delta.Fatigue) * 0.8)
-			}
-			c.Cost.Fatigue = int(float64(c.Cost.Fatigue)*1.2 + 0.5)
-		}
-	}
-	// Ensure 2-6 range: pad with a generic low-risk introspection if <2 or add cap
-	for len(choices) < 2 {
-		choices = append(choices, Choice{Index: len(choices), Label: "Take a cautious pause", Archetype: "pause", Cost: Cost{Time: 1}, Risk: RiskLow, Delta: Stats{Morale: 1}})
-	}
-	if len(choices) > 6 {
-		choices = choices[:6]
-	}
-	// Reindex to be safe
+	choices := make([]Choice, len(ctx.Choices))
+	copy(choices, ctx.Choices)
 	for i := range choices {
-		choices[i].Index = i
+		adjustRisk(&choices[i], *s, cfg)
 	}
-	// risk recalculation pass
-	for i := range choices {
-		adjustRisk(&choices[i], s, cfg)
-	}
-	return choices
+	return choices, ctx, nil
 }
 
-// ApplyChoice applies mechanical deltas and returns resulting stats delta.
-func ApplyChoice(s *Survivor, c Choice, diff Difficulty, currentTurn int) Stats {
-	d := c.Delta
-	// Convert cost to drains
-	d.Fatigue += c.Cost.Fatigue
-	d.Hunger += c.Cost.Hunger
-	d.Thirst += c.Cost.Thirst
-	// baseline drains by difficulty
-	baseH, baseT, baseF := 2, 3, 2 // standard defaults
+// ApplyChoice applies mechanical deltas and returns resulting resolution summary.
+func ApplyChoice(s *Survivor, c Choice, diff Difficulty, currentTurn int, randStream *Stream) Resolution {
+	result := Resolution{}
+	if s.Meters == nil {
+		s.Meters = make(map[Meter]int)
+	}
+	statStream := randStream
+	if statStream == nil {
+		seed := Derive(SeedFromString(c.ID), fmt.Sprintf("turn:%d", currentTurn))
+		statStream = newStream(seed)
+	}
+	delta := sampleOutcome(c.Outcome, statStream)
+	delta.Fatigue += c.Cost.Fatigue
+	delta.Hunger += c.Cost.Hunger
+	delta.Thirst += c.Cost.Thirst
+	baseH, baseT, baseF := 2, 3, 2
 	switch diff {
 	case DifficultyEasy:
 		baseH, baseT, baseF = 1, 2, 1
 	case DifficultyHard:
 		baseH, baseT, baseF = 3, 4, 3
 	}
-	d.Hunger += baseH
-	d.Thirst += baseT
-	d.Fatigue += baseF
-	s.UpdateStats(d)
-	advanceConditions(s)
-	// remove duplicate old Tick baseline to prevent double drain
-	// s.Tick()
+	delta.Hunger += baseH
+	delta.Thirst += baseT
+	delta.Fatigue += baseF
+	s.UpdateStats(delta)
+	added, removed := applyChoiceEffect(s, c.Effects)
+	if len(added) > 0 {
+		result.Added = append(result.Added, added...)
+	}
+	if len(removed) > 0 {
+		result.Removed = append(result.Removed, removed...)
+	}
+	condOutcome := advanceConditions(s, diff, c, delta)
+	if condOutcome.Delta != (Stats{}) {
+		s.UpdateStats(condOutcome.Delta)
+		delta = addStats(delta, condOutcome.Delta)
+	}
+	if len(condOutcome.Added) > 0 {
+		result.Added = append(result.Added, condOutcome.Added...)
+	}
+	if len(condOutcome.Removed) > 0 {
+		result.Removed = append(result.Removed, condOutcome.Removed...)
+	}
 	s.EvaluateDeath()
-	if c.Index == -1 && s.Meters != nil {
-		// record last custom action turn for cooldown enforcement
+	if c.Index == -1 {
 		s.Meters[MeterCustomLastTurn] = currentTurn
 	}
 	if c.Archetype != "" {
 		s.GainSkill(relevantSkill(c.Archetype), true)
 	}
-	return d
+	result.Delta = delta
+	return result
 }
 
-func advanceConditions(s *Survivor) {
-	if s.Meters == nil {
-		return
+func sampleOutcome(out ChoiceOutcome, stream *Stream) Stats {
+	res := Stats{}
+	if len(out) == 0 {
+		return res
 	}
-	// thirst streak for dehydration trigger
-	if s.Stats.Thirst >= 80 {
-		s.Meters[MeterThirstStreak]++
-	} else {
-		s.Meters[MeterThirstStreak] = 0
-	}
-	// cold exposure
-	if s.Environment.TempBand == TempCold || s.Environment.TempBand == TempFreezing {
-		s.Meters[MeterColdExposure]++
-	} else {
-		s.Meters[MeterColdExposure] = 0
-	}
-	// fever rest tracking if fever present and resting archetype chosen handled externally; placeholder decrement
-	if hasCondition(s, ConditionFever) {
-		s.Meters[MeterFeverRest]++
-	} else {
-		s.Meters[MeterFeverRest] = 0
-	}
-	// warm streak for hypothermia recovery
-	if !(s.Environment.TempBand == TempCold || s.Environment.TempBand == TempFreezing) {
-		s.Meters[MeterWarmStreak]++
-	} else {
-		s.Meters[MeterWarmStreak] = 0
-	}
-	// exhaustion scenes counter
-	if s.Stats.Fatigue >= 85 {
-		s.Meters[MeterExhaustionScenes]++
-	} else {
-		s.Meters[MeterExhaustionScenes] = 0
-	}
-	applyConditionTransitions(s)
-	applyConditionDrains(s)
-}
-
-func hasCondition(s *Survivor, c Condition) bool {
-	for _, x := range s.Conditions {
-		if x == c {
-			return true
+	for key, rng := range out {
+		label := "stat:" + string(key)
+		value := sampleValue(rng, stream, label)
+		switch key {
+		case StatHealth:
+			res.Health += value
+		case StatHunger:
+			res.Hunger += value
+		case StatThirst:
+			res.Thirst += value
+		case StatFatigue:
+			res.Fatigue += value
+		case StatMorale:
+			res.Morale += value
 		}
 	}
-	return false
-}
-func addCondition(s *Survivor, c Condition) {
-	if hasCondition(s, c) {
-		return
-	}
-	s.Conditions = append(s.Conditions, c)
-}
-func removeCondition(s *Survivor, c Condition) {
-	out := make([]Condition, 0, len(s.Conditions))
-	for _, x := range s.Conditions {
-		if x != c {
-			out = append(out, x)
-		}
-	}
-	s.Conditions = out
+	return res
 }
 
-func applyConditionTransitions(s *Survivor) {
-	if s.Meters[MeterThirstStreak] >= 3 {
-		addCondition(s, ConditionDehydration)
+func sampleValue(rng DeltaRange, stream *Stream, label string) int {
+	minV := rng.Min
+	maxV := rng.Max
+	if stream == nil || minV == maxV {
+		return minV
 	}
-	if s.Meters[MeterColdExposure] >= 3 {
-		addCondition(s, ConditionHypothermia)
+	span := maxV - minV + 1
+	if span <= 1 {
+		return minV
 	}
-	if s.Meters[MeterExhaustionScenes] >= 1 {
-		addCondition(s, ConditionExhaustion)
-	}
-	// recovery
-	if s.Meters[MeterThirstStreak] == 0 && s.Stats.Thirst <= 40 {
-		removeCondition(s, ConditionDehydration)
-	}
-	if s.Meters[MeterWarmStreak] >= 4 {
-		removeCondition(s, ConditionHypothermia)
-	}
-	if s.Stats.Fatigue <= 50 {
-		removeCondition(s, ConditionExhaustion)
-	}
+	local := stream.Child(label)
+	return minV + local.Intn(span)
 }
 
-func applyConditionDrains(s *Survivor) {
-	for _, c := range s.Conditions {
-		switch c {
-		case ConditionBleeding:
-			s.UpdateStats(Stats{Health: -6, Fatigue: 2})
-		case ConditionDehydration:
-			s.UpdateStats(Stats{Fatigue: 2, Morale: -2, Health: -1})
-		case ConditionFever:
-			s.UpdateStats(Stats{Fatigue: 1, Morale: -2, Health: -1})
-		case ConditionHypothermia:
-			s.UpdateStats(Stats{Health: -3, Fatigue: 2})
-		case ConditionExhaustion:
-			if s.Meters[MeterExhaustionScenes] >= 4 {
-				s.UpdateStats(Stats{Health: -1})
-			}
-		}
+func addStats(a, b Stats) Stats {
+	return Stats{
+		Health:  a.Health + b.Health,
+		Hunger:  a.Hunger + b.Hunger,
+		Thirst:  a.Thirst + b.Thirst,
+		Fatigue: a.Fatigue + b.Fatigue,
+		Morale:  a.Morale + b.Morale,
 	}
 }
 

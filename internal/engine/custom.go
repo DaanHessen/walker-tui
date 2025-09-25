@@ -34,37 +34,42 @@ func ValidateCustomAction(input string, base Survivor) (Choice, bool, string) {
 	if archetype != "forage" && (base.Stats.Hunger > 95 || base.Stats.Thirst > 95) {
 		return Choice{}, false, "Critical needs first"
 	}
-	if last, ok := base.Meters[MeterNoise]; ok {
-		_ = last
-	} // placeholder example
-	if tag, ok := base.Meters[MeterVisibility]; ok {
-		_ = tag
-	} // placeholder
-	if lc, ok := base.Meters[MeterScent]; ok {
-		_ = lc
-	} // placeholder
-	// remove obsolete hash-based cooldown; real cooldown enforced in UI using MeterCustomLastTurn
+    // cooldown enforced in UI using MeterCustomLastTurn
 	// Map archetype to synthetic choice (index -1 indicates synthetic)
-	c := Choice{Index: -1, Label: "Custom: " + input, Risk: RiskLow, Archetype: archetype}
+	c := Choice{
+		Index:       -1,
+		ID:          "custom:" + archetype,
+		Label:       "Custom: " + input,
+		Risk:        RiskLow,
+		Archetype:   archetype,
+		Outcome:     make(ChoiceOutcome),
+		SourceEvent: "",
+		Custom:      true,
+	}
 	switch archetype {
 	case "rest":
 		c.Cost = Cost{Time: 1}
-		c.Delta = Stats{Fatigue: -12, Morale: 1}
+		c.Outcome[StatFatigue] = DeltaRange{Min: -12, Max: -12}
+		c.Outcome[StatMorale] = DeltaRange{Min: 1, Max: 1}
 	case "forage":
 		c.Cost = Cost{Time: 1, Fatigue: 4}
 		c.Risk = ternary(base.Environment.Infected, RiskModerate, RiskLow)
-		c.Delta = Stats{Hunger: -8, Thirst: -4, Fatigue: 4}
+		c.Outcome[StatHunger] = DeltaRange{Min: -8, Max: -6}
+		c.Outcome[StatThirst] = DeltaRange{Min: -6, Max: -4}
+		c.Outcome[StatFatigue] = DeltaRange{Min: 4, Max: 6}
 	case "scout":
 		c.Cost = Cost{Time: 1, Fatigue: 6}
 		c.Risk = ternary(base.Environment.Infected, RiskModerate, RiskLow)
-		c.Delta = Stats{Fatigue: 5, Morale: 2}
+		c.Outcome[StatFatigue] = DeltaRange{Min: 5, Max: 7}
+		c.Outcome[StatMorale] = DeltaRange{Min: 1, Max: 2}
 	case "organize":
 		c.Cost = Cost{Time: 1}
-		c.Delta = Stats{Morale: 2}
+		c.Outcome[StatMorale] = DeltaRange{Min: 1, Max: 3}
 	case "barricade":
 		c.Cost = Cost{Time: 1, Fatigue: 7}
 		c.Risk = ternary(base.Environment.Infected, RiskModerate, RiskLow)
-		c.Delta = Stats{Fatigue: 7, Morale: 1}
+		c.Outcome[StatFatigue] = DeltaRange{Min: 7, Max: 9}
+		c.Outcome[StatMorale] = DeltaRange{Min: 0, Max: 1}
 	}
 	return c, true, ""
 }

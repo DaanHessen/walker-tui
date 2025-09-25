@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/DaanHessen/walker-tui/internal/engine"
 	"github.com/DaanHessen/walker-tui/internal/store"
 	"github.com/DaanHessen/walker-tui/internal/text"
 	"github.com/DaanHessen/walker-tui/internal/ui"
@@ -15,17 +19,18 @@ import (
 )
 
 var (
-	version = "0.1.0"
+	version      = "0.1.0"
+	rulesVersion = "1.0.0"
+	seedAlphabet = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 )
 
 func main() {
-	// Global flags
-	seed := flag.Int64("seed", time.Now().UnixNano(), "RNG seed")
+	seedFlag := flag.String("seed", "", "Run seed string (optional; random if omitted)")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL DSN")
 	density := flag.String("density", "standard", "Text density: concise|standard|rich")
 	noAI := flag.Bool("no-ai", false, "Disable DeepSeek narration (force minimal fallback)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "walker-tui [--seed N] [--dsn DSN] [--density=concise|standard|rich] [--no-ai] | migrate up|down | version\n")
+		fmt.Fprintf(os.Stderr, "walker-tui [--seed seedstring] [--dsn DSN] [--density=concise|standard|rich] [--no-ai] | migrate up|down | version\n")
 	}
 	flag.Parse()
 
@@ -67,19 +72,46 @@ func main() {
 		}
 	}
 
+	seedText := strings.TrimSpace(*seedFlag)
+	if seedText == "" {
+		generated, err := generateSeed()
+		if err != nil {
+			log.Fatalf("failed to generate seed: %v", err)
+		}
+		seedText = generated
+		fmt.Printf("New run seed: %s\n", seedText)
+	}
+
 	cfg := util.Config{
-		Seed:        *seed,
-		DSN:         *dsn,
-		TextDensity: *density,
-		UseAI:       !*noAI && os.Getenv("DEEPSEEK_API_KEY") != "",
-		DebugLAD:    os.Getenv("ZEROPOINT_DEBUG_LAD") == "1",
+		SeedText:     seedText,
+		DSN:          *dsn,
+		TextDensity:  *density,
+		UseAI:        !*noAI && os.Getenv("DEEPSEEK_API_KEY") != "",
+		DebugLAD:     os.Getenv("ZEROPOINT_DEBUG_LAD") == "1",
+		RulesVersion: rulesVersion,
 	}
 
 	ctx := context.Background()
 
+	// Ensure migrations are present and applied before opening UI
+	mig, err := store.NewMigrator(cfg.DSN)
+	if err != nil {
+		log.Fatalf("migrations init failed: %v", err)
+	}
+	migCtx, cancelMig := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelMig()
+	if err := mig.Up(migCtx); err != nil && err != store.ErrNoChange {
+		log.Fatalf("migrations failed: %v", err)
+	}
+
+	// Verify event registry exists and is valid
+	if err := engine.VerifyEventsPack("assets/events"); err != nil {
+		log.Fatalf("event registry error: %v", err)
+	}
+
 	db, err := store.Open(ctx, cfg)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		log.Fatalf("failed to open database: %v", err)
 	}
 	defer db.Close()
 
@@ -100,4 +132,12 @@ func main() {
 	if err := ui.Run(ctx, db, narrator, cfg, version); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func generateSeed() (string, error) {
+	buf := make([]byte, 15) // 24 characters base32
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return strings.ToLower(seedAlphabet.EncodeToString(buf)), nil
 }

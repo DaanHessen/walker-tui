@@ -1,0 +1,19 @@
+id: first_aid_bandage
+name: Quick Bandage
+tier: any
+rarity: common
+cooldown_scenes: 1
+once_per_run: false
+preconditions:
+  require_conditions: ["bleeding"]
+choices:
+  - id: apply_bandage
+    label: Apply pressure and bandage the wound.
+    archetypes: ["organize"]
+    base_risk: low
+    base_cost:
+      time_min: 1
+      fatigue: 2
+    effects_on_resolve:
+      remove_conditions: ["bleeding"]
+

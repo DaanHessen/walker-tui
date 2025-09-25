@@ -62,18 +62,20 @@ const (
 var AllConditions = []Condition{ConditionBleeding, ConditionFracture, ConditionInfection, ConditionFever, ConditionHypothermia, ConditionHeatstroke, ConditionDehydration, ConditionPain, ConditionPoisoning, ConditionExhaustion}
 
 const (
-	MeterNoise            Meter = "noise"
-	MeterVisibility       Meter = "visibility"
-	MeterScent            Meter = "scent"
-	MeterThirstStreak     Meter = "thirst_streak"
-	MeterColdExposure     Meter = "cold_exposure"
-	MeterFeverRest        Meter = "fever_rest"
-	MeterWarmStreak       Meter = "warm_streak"
-	MeterExhaustionScenes Meter = "exhaustion_scenes"
-	MeterCustomLastTurn   Meter = "custom_last_turn"
+	MeterNoise             Meter = "noise"
+	MeterVisibility        Meter = "visibility"
+	MeterScent             Meter = "scent"
+	MeterThirstStreak      Meter = "thirst_streak"
+	MeterHydrationRecovery Meter = "hydration_recovery"
+	MeterColdExposure      Meter = "cold_exposure"
+	MeterFeverRest         Meter = "fever_rest"
+	MeterFeverMedication   Meter = "fever_medication"
+	MeterWarmStreak        Meter = "warm_streak"
+	MeterExhaustionScenes  Meter = "exhaustion_scenes"
+	MeterCustomLastTurn    Meter = "custom_last_turn"
 )
 
-var AllMeters = []Meter{MeterNoise, MeterVisibility, MeterScent, MeterThirstStreak, MeterColdExposure, MeterFeverRest, MeterWarmStreak, MeterExhaustionScenes, MeterCustomLastTurn}
+var AllMeters = []Meter{MeterNoise, MeterVisibility, MeterScent, MeterThirstStreak, MeterHydrationRecovery, MeterColdExposure, MeterFeverRest, MeterFeverMedication, MeterWarmStreak, MeterExhaustionScenes, MeterCustomLastTurn}
 
 const (
 	LocationCity     LocationType = "city"

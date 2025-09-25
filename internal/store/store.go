@@ -56,10 +56,11 @@ func Open(ctx context.Context, cfg util.Config) (*DB, error) {
 
 // Run model (DB layer minimal)
 type Run struct {
-	ID         uuid.UUID
-	OriginSite string
-	Seed       int64
-	CurrentDay int
+	ID           uuid.UUID
+	OriginSite   string
+	CurrentDay   int
+	SeedText     string
+	RulesVersion string
 }
 
 type SurvivorRecord struct {
@@ -87,12 +88,19 @@ type SurvivorRecord struct {
 type RunRepo struct{ db *DB }
 
 func NewRunRepo(db *DB) *RunRepo { return &RunRepo{db: db} }
-func (r *RunRepo) Create(ctx context.Context, origin string, seed int64) (Run, error) {
+
+// CreateWithSeed inserts a run with canonical seed text.
+func (r *RunRepo) CreateWithSeed(ctx context.Context, origin, seedText, rulesVersion string) (Run, error) {
 	id := uuid.New()
-	if err := r.db.gorm.Exec(`INSERT INTO runs(id, origin_site, seed) VALUES(?,?,?)`, id, origin, seed).Error; err != nil {
+	if err := r.db.gorm.Exec(`INSERT INTO runs(id, origin_site, seed, rules_version) VALUES(?,?,?,?)`, id, origin, seedText, rulesVersion).Error; err != nil {
 		return Run{}, err
 	}
-	return Run{ID: id, OriginSite: origin, Seed: seed, CurrentDay: 0}, nil
+	return Run{ID: id, OriginSite: origin, CurrentDay: 0, SeedText: seedText, RulesVersion: rulesVersion}, nil
+}
+
+// Legacy Create retained for backwards compatibility.
+func (r *RunRepo) Create(ctx context.Context, origin string, seed int64) (Run, error) {
+	return r.CreateWithSeed(ctx, origin, fmt.Sprint(seed), "1.0.0")
 }
 
 // SurvivorRepo minimal creation.
@@ -196,6 +204,114 @@ type LogRepo struct{ db *DB }
 
 func NewLogRepo(db *DB) *LogRepo { return &LogRepo{db: db} }
 
+type EventRepo struct{ db *DB }
+
+func NewEventRepo(db *DB) *EventRepo { return &EventRepo{db: db} }
+
+type NarrationCacheRepo struct{ db *DB }
+
+func NewNarrationCacheRepo(db *DB) *NarrationCacheRepo { return &NarrationCacheRepo{db: db} }
+
+type EventInstanceRecord struct {
+	RunID              uuid.UUID
+	SurvivorID         uuid.UUID
+	EventID            string
+	WorldDay           int
+	SceneIdx           int
+	CooldownUntilScene int
+	ArcID              string
+	ArcStep            int
+	OnceFired          bool
+}
+
+func (er *EventRepo) LoadHistory(ctx context.Context, tx *gorm.DB, runID uuid.UUID) (engine.EventHistory, error) {
+	hist := engine.EventHistory{
+		Events: make(map[string]engine.EventState),
+		Arcs:   make(map[string]engine.ArcState),
+	}
+	if runID == uuid.Nil {
+		return hist, nil
+	}
+	db := er.db.gorm.WithContext(ctx)
+	if tx != nil {
+		db = tx.WithContext(ctx)
+	}
+	rows, err := db.Raw(`SELECT event_id, scene_idx, cooldown_until_scene, once_fired, COALESCE(arc_id,''), COALESCE(arc_step,0) FROM event_instances WHERE run_id = ? ORDER BY scene_idx DESC, created_at DESC`, runID).Rows()
+	if err != nil {
+		return hist, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			eventID   string
+			sceneIdx  int
+			cooldown  int
+			onceFired bool
+			arcID     sql.NullString
+			arcStep   sql.NullInt64
+		)
+		if err := rows.Scan(&eventID, &sceneIdx, &cooldown, &onceFired, &arcID, &arcStep); err != nil {
+			return hist, err
+		}
+		if _, ok := hist.Events[eventID]; !ok {
+			hist.Events[eventID] = engine.EventState{
+				LastSceneIdx:       sceneIdx,
+				CooldownUntilScene: cooldown,
+				OnceFired:          onceFired,
+			}
+		}
+		if arcID.Valid {
+			if _, ok := hist.Arcs[arcID.String]; !ok {
+				hist.Arcs[arcID.String] = engine.ArcState{
+					LastStep:     int(arcStep.Int64),
+					LastSceneIdx: sceneIdx,
+					LastEventID:  eventID,
+				}
+			}
+		}
+	}
+	return hist, nil
+}
+
+func (er *EventRepo) Insert(ctx context.Context, tx *gorm.DB, rec EventInstanceRecord) error {
+	db := er.db.gorm.WithContext(ctx)
+	if tx != nil {
+		db = tx.WithContext(ctx)
+	}
+	var arcID any
+	if rec.ArcID == "" {
+		arcID = nil
+	} else {
+		arcID = rec.ArcID
+	}
+	return db.Exec(`INSERT INTO event_instances(run_id, survivor_id, event_id, world_day, scene_idx, cooldown_until_scene, arc_id, arc_step, once_fired) VALUES (?,?,?,?,?,?,?,?,?)`,
+		rec.RunID, rec.SurvivorID, rec.EventID, rec.WorldDay, rec.SceneIdx, rec.CooldownUntilScene, arcID, rec.ArcStep, rec.OnceFired).Error
+}
+
+func (nr *NarrationCacheRepo) Get(ctx context.Context, tx *gorm.DB, runID uuid.UUID, kind string, hash []byte) (string, bool, error) {
+	db := nr.db.gorm.WithContext(ctx)
+	if tx != nil {
+		db = tx.WithContext(ctx)
+	}
+	row := db.Raw(`SELECT text FROM narration_cache WHERE run_id = ? AND kind = ? AND state_hash = ?`, runID, kind, hash).Row()
+	var text string
+	if err := row.Scan(&text); err != nil {
+		if errs.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return text, true, nil
+}
+
+func (nr *NarrationCacheRepo) Put(ctx context.Context, tx *gorm.DB, runID uuid.UUID, kind string, hash []byte, text string) error {
+	db := nr.db.gorm.WithContext(ctx)
+	if tx != nil {
+		db = tx.WithContext(ctx)
+	}
+	return db.Exec(`INSERT INTO narration_cache(run_id, state_hash, kind, text) VALUES (?,?,?,?) ON CONFLICT DO NOTHING`, runID, hash, kind, text).Error
+}
+
 // WithTx executes fn within a database transaction.
 func (d *DB) WithTx(ctx context.Context, fn func(tx *gorm.DB) error) error {
 	return d.gorm.WithContext(ctx).Transaction(fn)
@@ -212,9 +328,9 @@ func pqStringArray[T ~string](in []T) []string {
 
 // RunRepo additions
 func (r *RunRepo) Get(ctx context.Context, id uuid.UUID) (Run, error) {
-	row := r.db.gorm.Raw(`SELECT id, origin_site, seed, current_day FROM runs WHERE id = ?`, id).Row()
+	row := r.db.gorm.Raw(`SELECT id, origin_site, current_day, COALESCE(seed, ''), COALESCE(rules_version,'1.0.0') FROM runs WHERE id = ?`, id).Row()
 	var rr Run
-	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.Seed, &rr.CurrentDay); err != nil {
+	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.CurrentDay, &rr.SeedText, &rr.RulesVersion); err != nil {
 		return Run{}, err
 	}
 	return rr, nil
@@ -222,9 +338,9 @@ func (r *RunRepo) Get(ctx context.Context, id uuid.UUID) (Run, error) {
 
 // GetLatestRun returns most recently created run (by created_at) – assuming created_at exists.
 func (r *RunRepo) GetLatestRun(ctx context.Context) (Run, error) {
-	row := r.db.gorm.WithContext(ctx).Raw(`SELECT id, origin_site, seed, current_day FROM runs ORDER BY created_at DESC LIMIT 1`).Row()
+	row := r.db.gorm.WithContext(ctx).Raw(`SELECT id, origin_site, current_day, COALESCE(seed, ''), COALESCE(rules_version,'1.0.0') FROM runs ORDER BY created_at DESC LIMIT 1`).Row()
 	var rr Run
-	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.Seed, &rr.CurrentDay); err != nil {
+	if err := row.Scan(&rr.ID, &rr.OriginSite, &rr.CurrentDay, &rr.SeedText, &rr.RulesVersion); err != nil {
 		return Run{}, err
 	}
 	return rr, nil
@@ -304,11 +420,12 @@ func (cr *ChoiceRepo) BulkInsert(ctx context.Context, tx *gorm.DB, sceneID uuid.
 }
 
 // UpdateRepo persistence
-func (ur *UpdateRepo) Insert(ctx context.Context, tx *gorm.DB, sceneID uuid.UUID, deltas engine.Stats, newConditions []engine.Condition) (uuid.UUID, error) {
+func (ur *UpdateRepo) Insert(ctx context.Context, tx *gorm.DB, sceneID uuid.UUID, deltas engine.Stats, added, removed []engine.Condition) (uuid.UUID, error) {
 	id := uuid.New()
 	dB, _ := json.Marshal(deltas)
-	conds := pqStringArray(newConditions)
-	if err := tx.Exec(`INSERT INTO updates(id, scene_id, deltas, new_conditions) VALUES (?,?,?,?)`, id, sceneID, dB, pq.Array(conds)).Error; err != nil {
+	addArr := pqStringArray(added)
+	remArr := pqStringArray(removed)
+	if err := tx.Exec(`INSERT INTO updates(id, scene_id, deltas, conditions_added, conditions_removed) VALUES (?,?,?,?,?)`, id, sceneID, dB, pq.Array(addArr), pq.Array(remArr)).Error; err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil

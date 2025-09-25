@@ -1,15 +1,16 @@
 package engine
 
 import (
-	"math/rand"
-	"time"
+    "strings"
+    "time"
 )
 
 // World holds run-wide data.
 type World struct {
-	OriginSite string
-	Seed       int64
-	CurrentDay int // advances globally; survivors spawn into this
+	OriginSite   string
+	Seed         RunSeed
+	RulesVersion string
+	CurrentDay   int // advances globally; survivors spawn into this
 }
 
 // Survivor represents an in-game character.
@@ -64,81 +65,71 @@ type Environment struct {
 	Timezone  string // IANA timezone identifier
 }
 
-// RNG returns a deterministic rand.Rand for a seed.
-func RNG(seed int64) *rand.Rand { return rand.New(rand.NewSource(seed)) }
-
-// ComputeLAD calculates Local Arrival Day based on distance and simple modifiers.
-// distanceKM bucketed into tiers; modifiers adjust within tier bounds.
-// hub: -1 day (min 0); rural: +1 day; closures: +1; evac wave: jitter +/-1.
-func ComputeLAD(distanceKM float64, hub bool, rural bool, closures bool, evac bool, seed int64) int {
-	var baseMin, baseMax int
-	switch {
-	case distanceKM <= 100:
-		baseMin, baseMax = 0, 0 // Tier A immediate
-	case distanceKM <= 800:
-		baseMin, baseMax = 1, 3 // Tier B
-	case distanceKM <= 3000:
-		baseMin, baseMax = 3, 10 // Tier C
-	default:
-		baseMin, baseMax = 7, 21 // Tier D
-	}
-	// midpoint start
-	mid := (baseMin + baseMax) / 2
-	if hub {
-		mid -= 1
-	}
-	if rural {
-		mid += 1
-	}
-	if closures {
-		mid += 1
-	}
-	if mid < baseMin {
-		mid = baseMin
-	}
-	if mid > baseMax {
-		mid = baseMax
-	}
-	if evac {
-		r := rand.New(rand.NewSource(seed + int64(mid)))
-		mid += r.Intn(3) - 1 // -1..+1
-		if mid < baseMin {
-			mid = baseMin
-		}
-		if mid > baseMax {
-			mid = baseMax
-		}
-	}
-	return mid
+// ComputeLAD calculates Local Arrival Day based on distance and modifiers.
+func ComputeLAD(distanceKM float64, hub bool, rural bool, closures bool, evac bool, jitterStream *Stream) int {
+    var baseMin, baseMax int
+    switch {
+    case distanceKM <= 100:
+        baseMin, baseMax = 0, 0 // Tier A immediate
+    case distanceKM <= 800:
+        baseMin, baseMax = 1, 3 // Tier B
+    case distanceKM <= 3000:
+        baseMin, baseMax = 3, 10 // Tier C
+    default:
+        baseMin, baseMax = 7, 21 // Tier D
+    }
+    // start at midpoint
+    lad := (baseMin + baseMax) / 2
+    // hub airport / HSR: -2 (min Day 0 for B+ tiers)
+    if hub {
+        lad -= 2
+        if baseMin > 0 && lad < 0 { // never below day 0 for non-TierA
+            lad = 0
+        }
+    }
+    // rural: +2..+5
+    if rural {
+        lad += 2 + jitterStream.Child("rural").Intn(4) // 2..5
+    }
+    // border closures: +2..+7
+    if closures {
+        lad += 2 + jitterStream.Child("closures").Intn(6) // 2..7
+    }
+    // evacuation routes: -2..-1
+    if evac {
+        lad -= 2 - jitterStream.Child("evac").Intn(2) // -2 or -1
+        if baseMin > 0 && lad < 0 {
+            lad = 0
+        }
+    }
+    if lad < baseMin {
+        lad = baseMin
+    }
+    if lad > baseMax {
+        lad = baseMax
+    }
+    return lad
 }
 
-// deriveInitialLAD produces a plausible Local Arrival Day for a survivor's starting location.
-// This is a heuristic placeholder until a richer geospatial model is implemented.
-// We approximate distance bands based on location type and apply random flags.
-func deriveInitialLAD(r *rand.Rand, originSite string, loc LocationType, seed int64) int {
-	// Approximate distance from outbreak origin (km) by location type distribution.
+func deriveInitialLAD(stream *Stream, loc LocationType) int {
+	// Distance heuristics per location tier
+	distStream := stream.Child("distance")
 	var distance float64
 	switch loc {
 	case LocationCity:
-		// Closer on average
-		distance = 50 + r.Float64()*150 // 50-200
+		distance = 50 + distStream.Float64()*150 // 50-200
 	case LocationSuburb:
-		distance = 150 + r.Float64()*600 // 150-750
+		distance = 150 + distStream.Float64()*600 // 150-750
 	case LocationRural:
-		distance = 400 + r.Float64()*2600 // 400-3000
+		distance = 400 + distStream.Float64()*2600 // 400-3000
 	default:
-		distance = 500 + r.Float64()*2000
+		distance = 500 + distStream.Float64()*2000
 	}
-	// Modifiers.
 	hub := loc == LocationCity
 	ruralFlag := loc == LocationRural
-	closures := r.Float64() < 0.15 // 15% chance of transport closures slowing spread
-	evac := r.Float64() < 0.20     // 20% chance evacuation wave introduces jitter
-	lad := ComputeLAD(distance, hub, ruralFlag, closures, evac, seed+int64(r.Intn(9999)))
-	if lad < 0 {
-		lad = 0
-	}
-	return lad
+	closures := distStream.Child("closures").Float64() < 0.15
+	evac := distStream.Child("evac").Float64() < 0.20
+	return ComputeLAD(distance, hub, ruralFlag, closures, evac, stream.Child("lad"))
 }
 
 // Clamp stat into 0-100.
@@ -174,60 +165,86 @@ var professionTemplates = []professionTemplate{
 	{"student", [2]int{75, 90}, [2]int{20, 35}, [2]int{20, 35}, [2]int{5, 15}, [2]int{60, 80}, func(inv *Inventory) { inv.Memento = "photo" }},
 }
 
-func pickProfession(r *rand.Rand) professionTemplate {
-	return professionTemplates[r.Intn(len(professionTemplates))]
+func pickProfession(stream *Stream) professionTemplate {
+	return professionTemplates[stream.Child("profession").Intn(len(professionTemplates))]
 }
 
-func randIn(r *rand.Rand, rng [2]int) int { return rng[0] + r.Intn(rng[1]-rng[0]+1) }
+func randIn(stream *Stream, rng [2]int) int {
+	span := rng[1] - rng[0] + 1
+	if span <= 0 {
+		return rng[0]
+	}
+	return rng[0] + stream.Intn(span)
+}
 
-func randomName(r *rand.Rand) string {
+func randomName(stream *Stream) string {
 	names := []string{"Alex", "Jordan", "Taylor", "Riley", "Morgan", "Casey", "Jamie", "Avery"}
-	return names[r.Intn(len(names))]
+	return names[stream.Child("given").Intn(len(names))]
 }
 
-func randomSurname(r *rand.Rand) string { return surnames[r.Intn(len(surnames))] }
+func randomSurname(stream *Stream) string {
+	return surnames[stream.Child("surname").Intn(len(surnames))]
+}
 
 // NewFirstSurvivor generates the initial survivor per first-run rule.
-// Implements probability 5% researcher pre-outbreak (Day -9..0) inside facility; otherwise day 0 near origin (<=100km) LAD=0.
-func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor {
-	// Researcher path decision (5%). If chosen, worldDay random -9..0 and location forced city (facility interior concept), LAD=0 but infected not present until day 0.
-	researcher := r.Float64() < 0.05
+func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
+	roleStream := stream.Child("role")
+	researcher := roleStream.Float64() < 0.05
+	worldDay := 0
 	if researcher {
-		worldDay = -9 + r.Intn(10) // -9..0
+		worldDay = -9 + roleStream.Child("researcher-day").Intn(10)
 	}
-	traits := []Trait{AllTraits[r.Intn(len(AllTraits))]}
-	for len(traits) < 2 { // ensure two distinct traits
-		if t := AllTraits[r.Intn(len(AllTraits))]; t != traits[0] {
-			traits = append(traits, t)
-		}
-	}
-	skills := make(map[Skill]int)
-	for _, s := range AllSkills {
-		skills[s] = 0
-	}
+
+	traits := selectTraits(stream.Child("traits"), 2)
+	skills := baselineSkills()
 	loc := LocationSuburb
 	if researcher {
 		loc = LocationCity
 	}
-	// First survivor distance <=100km => Tier A LAD=0
-	lad := 0
-	prof := pickProfession(r)
-	inv := Inventory{Weapons: nil, Ammo: map[string]int{}, FoodDays: 0.5, WaterLiters: 1.0, Medical: []string{"bandage"}, Tools: []string{"pocket knife"}}
+	lad := 0 // Tier A per spec
+
+	prof := pickProfession(stream.Child("profession"))
+	inv := baseInventory(stream.Child("inventory"))
 	prof.InventoryFn(&inv)
-	// Researcher inventory slight variant (lab badge instead of pocket knife replacement)
 	if researcher {
 		inv.Tools = []string{"lab badge"}
 	}
-	stats := Stats{Health: randIn(r, prof.HealthRange), Hunger: randIn(r, prof.HungerRange), Thirst: randIn(r, prof.ThirstRange), Fatigue: randIn(r, prof.FatigueRange), Morale: randIn(r, prof.MoraleRange)}
-	fullName := randomName(r) + " " + randomSurname(r)
-	// Timezone placeholder: derive deterministic from seed via list (simplified until geo mapping added)
+
+	statsStream := stream.Child("stats")
+	stats := Stats{
+		Health:  randIn(statsStream.Child("health"), prof.HealthRange),
+		Hunger:  randIn(statsStream.Child("hunger"), prof.HungerRange),
+		Thirst:  randIn(statsStream.Child("thirst"), prof.ThirstRange),
+		Fatigue: randIn(statsStream.Child("fatigue"), prof.FatigueRange),
+		Morale:  randIn(statsStream.Child("morale"), prof.MoraleRange),
+	}
+
+	nameStream := stream.Child("name")
+	fullName := randomName(nameStream) + " " + randomSurname(nameStream)
+	zoneStream := stream.Child("timezone")
 	zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago"}
-	zone := zones[r.Intn(len(zones))]
-	return Survivor{
+	zone := zones[zoneStream.Intn(len(zones))]
+
+    // derive a non-revealing region label for UI
+    regionLabel := generalRegion(originRegion, stream.Child("region-label"))
+    env := Environment{
+		WorldDay:  worldDay,
+		TimeOfDay: initialTOD(stream.Child("tod")),
+		Season:    SeasonSpring,
+		Weather:   WeatherClear,
+		TempBand:  TempMild,
+        Region:    regionLabel,
+		Location:  loc,
+		LAD:       lad,
+		Infected:  worldDay >= lad,
+		Timezone:  zone,
+	}
+
+    survivor := Survivor{
 		Name:        fullName,
-		Age:         18 + r.Intn(38),
+		Age:         18 + stream.Child("age").Intn(38),
 		Background:  prof.Name,
-		Region:      originRegion,
+        Region:      regionLabel,
 		Location:    loc,
 		Group:       GroupSolo,
 		GroupSize:   1,
@@ -236,54 +253,177 @@ func NewFirstSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor 
 		Stats:       stats,
 		BodyTemp:    TempMild,
 		Conditions:  nil,
-		Meters:      map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0, MeterThirstStreak: 0, MeterColdExposure: 0, MeterFeverRest: 0, MeterWarmStreak: 0, MeterExhaustionScenes: 0, MeterCustomLastTurn: -10},
+		Meters:      baselineMeters(),
 		Inventory:   inv,
-		Environment: Environment{WorldDay: worldDay, TimeOfDay: initialTOD(r), Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad, Timezone: zone},
+		Environment: env,
 		Alive:       true,
 	}
+	return survivor
 }
 
-// initialTOD returns a simple time-of-day bucket.
-func initialTOD(r *rand.Rand) string {
+func initialTOD(stream *Stream) string {
 	segments := []string{"pre-dawn", "morning", "midday", "afternoon", "evening", "night"}
-	return segments[r.Intn(len(segments))]
+	return segments[stream.Intn(len(segments))]
 }
 
-// NewGenericSurvivor generates a replacement survivor (post-first) using broader randomization.
-func NewGenericSurvivor(r *rand.Rand, worldDay int, originRegion string) Survivor {
-	traits := []Trait{AllTraits[r.Intn(len(AllTraits))]}
-	for len(traits) < 2 {
-		if t := AllTraits[r.Intn(len(AllTraits))]; t != traits[0] {
-			traits = append(traits, t)
-		}
+// NewGenericSurvivor generates a replacement survivor using broader randomization.
+func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survivor {
+    traits := selectTraits(stream.Child("traits"), 2)
+    skills := baselineSkills()
+	groupStream := stream.Child("group")
+	groups := []GroupType{GroupSolo, GroupDuo, GroupSmallGroup}
+	g := groups[groupStream.Intn(len(groups))]
+	gSize := 1
+	switch g {
+	case GroupDuo:
+		gSize = 2
+	case GroupSmallGroup:
+		gSize = 3 + groupStream.Child("size").Intn(3)
 	}
-	skills := make(map[Skill]int)
+
+	locs := []LocationType{LocationCity, LocationSuburb, LocationRural}
+	loc := locs[stream.Child("location").Intn(len(locs))]
+	lad := deriveInitialLAD(stream.Child("lad"), loc)
+
+	prof := pickProfession(stream.Child("profession"))
+	inv := baseInventory(stream.Child("inventory"))
+	prof.InventoryFn(&inv)
+
+	statsStream := stream.Child("stats")
+	stats := Stats{
+		Health:  randIn(statsStream.Child("health"), prof.HealthRange),
+		Hunger:  randIn(statsStream.Child("hunger"), prof.HungerRange),
+		Thirst:  randIn(statsStream.Child("thirst"), prof.ThirstRange),
+		Fatigue: randIn(statsStream.Child("fatigue"), prof.FatigueRange),
+		Morale:  randIn(statsStream.Child("morale"), prof.MoraleRange),
+	}
+
+    nameStream := stream.Child("name")
+    fullName := randomName(nameStream) + " " + randomSurname(nameStream)
+    zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago", "Australia/Sydney"}
+    zone := zones[stream.Child("timezone").Intn(len(zones))]
+    // generic survivors may be anywhere in the world
+    regionLabel := pickWorldRegion(stream.Child("world-region"))
+
+	survivor := Survivor{
+		Name:       fullName,
+		Age:        16 + stream.Child("age").Intn(40),
+		Background: prof.Name,
+        Region:     regionLabel,
+		Location:   loc,
+		Group:      g,
+		GroupSize:  gSize,
+		Traits:     traits,
+		Skills:     skills,
+		Stats:      stats,
+		BodyTemp:   TempMild,
+		Conditions: nil,
+		Meters:     baselineMeters(),
+		Inventory:  inv,
+		Environment: Environment{
+			WorldDay:  worldDay,
+			TimeOfDay: initialTOD(stream.Child("tod")),
+			Season:    SeasonSpring,
+			Weather:   WeatherClear,
+			TempBand:  TempMild,
+			Region:    originRegion,
+			Location:  loc,
+			LAD:       lad,
+			Infected:  worldDay >= lad,
+			Timezone:  zone,
+		},
+		Alive: true,
+	}
+	return survivor
+}
+
+func selectTraits(stream *Stream, count int) []Trait {
+	if count <= 0 {
+		return nil
+	}
+	traits := make([]Trait, 0, count)
+	pool := append([]Trait{}, AllTraits...)
+	for len(traits) < count && len(pool) > 0 {
+		idx := stream.Intn(len(pool))
+		traits = append(traits, pool[idx])
+		pool = append(pool[:idx], pool[idx+1:]...)
+	}
+	return traits
+}
+
+func baselineSkills() map[Skill]int {
+	skills := make(map[Skill]int, len(AllSkills))
 	for _, s := range AllSkills {
 		skills[s] = 0
 	}
-	groups := []GroupType{GroupSolo, GroupDuo, GroupSmallGroup}
-	g := groups[r.Intn(len(groups))]
-	gSize := 1
-	if g == GroupDuo {
-		gSize = 2
-	} else if g == GroupSmallGroup {
-		gSize = 3 + r.Intn(3)
+	return skills
+}
+
+func baselineMeters() map[Meter]int {
+	return map[Meter]int{
+		MeterNoise:             0,
+		MeterVisibility:        0,
+		MeterScent:             0,
+		MeterThirstStreak:      0,
+		MeterHydrationRecovery: 0,
+		MeterColdExposure:      0,
+		MeterFeverRest:         0,
+		MeterFeverMedication:   0,
+		MeterWarmStreak:        0,
+		MeterExhaustionScenes:  0,
+		MeterCustomLastTurn:    -10,
 	}
-	locs := []LocationType{LocationCity, LocationSuburb, LocationRural}
-	loc := locs[r.Intn(len(locs))]
-	lad := deriveInitialLAD(r, originRegion, loc, r.Int63())
-	prof := pickProfession(r)
-	inv := Inventory{Weapons: nil, Ammo: map[string]int{}, FoodDays: 0.4, WaterLiters: 0.8, Medical: []string{"bandage"}}
-	prof.InventoryFn(&inv)
-	stats := Stats{Health: randIn(r, prof.HealthRange), Hunger: randIn(r, prof.HungerRange), Thirst: randIn(r, prof.ThirstRange), Fatigue: randIn(r, prof.FatigueRange), Morale: randIn(r, prof.MoraleRange)}
-	fullName := randomName(r) + " " + randomSurname(r)
-	zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago", "Australia/Sydney"}
-	zone := zones[r.Intn(len(zones))]
-	return Survivor{
-		Name: fullName, Age: 16 + r.Intn(40), Background: prof.Name, Region: originRegion, Location: loc, Group: g, GroupSize: gSize,
-		Traits: traits, Skills: skills, Stats: stats, BodyTemp: TempMild, Conditions: nil, Meters: map[Meter]int{MeterNoise: 0, MeterVisibility: 0, MeterScent: 0, MeterThirstStreak: 0, MeterColdExposure: 0, MeterFeverRest: 0, MeterWarmStreak: 0, MeterExhaustionScenes: 0, MeterCustomLastTurn: -10}, Inventory: inv,
-		Environment: Environment{WorldDay: worldDay, TimeOfDay: initialTOD(r), Season: SeasonSpring, Weather: WeatherClear, TempBand: TempMild, Region: originRegion, Location: loc, LAD: lad, Infected: worldDay >= lad, Timezone: zone}, Alive: true,
+}
+
+func baseInventory(stream *Stream) Inventory {
+	return Inventory{
+		Weapons:     nil,
+		Ammo:        map[string]int{},
+		FoodDays:    0.5,
+		WaterLiters: 1.0,
+		Medical:     []string{"bandage"},
+		Tools:       []string{"pocket knife"},
 	}
+}
+
+// generalRegion maps a hidden origin site string to a non-revealing coarse region label.
+func generalRegion(origin string, stream *Stream) string {
+    // Attempt to read country from parentheses
+    country := ""
+    if i := strings.LastIndex(origin, "("); i >= 0 && strings.HasSuffix(origin, ")") {
+        country = strings.TrimSuffix(origin[i+1:], ")")
+    }
+    switch country {
+    case "USA":
+        labs := []string{"Mid-Atlantic, USA", "Gulf Coast, USA", "Midwest, USA"}
+        return labs[stream.Intn(len(labs))]
+    case "UK":
+        opts := []string{"Southern England, UK", "Western England, UK"}
+        return opts[stream.Intn(len(opts))]
+    case "Germany":
+        opts := []string{"Northern Germany", "Western Germany"}
+        return opts[stream.Intn(len(opts))]
+    case "China":
+        opts := []string{"Central China", "Eastern China"}
+        return opts[stream.Intn(len(opts))]
+    case "Russia":
+        opts := []string{"Western Russia"}
+        return opts[stream.Intn(len(opts))]
+    default:
+        // Fallback coarse label
+        return "Unknown Region"
+    }
+}
+
+// pickWorldRegion selects a broad world region label for replacement survivors.
+func pickWorldRegion(stream *Stream) string {
+    regions := []string{
+        "Northeast USA", "West Coast USA", "Great Plains USA",
+        "Western Europe", "Northern Europe", "Southern Europe",
+        "Eastern Europe", "Central China", "Eastern China", "South Asia",
+        "Southeast Asia", "Oceania", "South America", "North Africa",
+    }
+    return regions[stream.Intn(len(regions))]
 }
 
 // AdvanceDay increments global day.
@@ -298,30 +438,23 @@ func (s *Survivor) UpdateStats(delta Stats) {
 	s.Stats.Morale = Clamp(s.Stats.Morale + delta.Morale)
 }
 
-// Tick increases hunger/thirst/fatigue baseline.
-func (s *Survivor) Tick() {
-	s.UpdateStats(Stats{Hunger: 5, Thirst: 7, Fatigue: 3})
-	if s.Stats.Thirst >= 90 || s.Stats.Hunger >= 95 {
-		s.UpdateStats(Stats{Health: -5, Morale: -3})
-	}
-}
-
 // IsDead returns if survivor is dead.
 func (s *Survivor) IsDead() bool { return s.Stats.Health <= 0 }
 
-// Simple death check logic placeholder.
+// EvaluateDeath toggles Alive based on health.
 func (s *Survivor) EvaluateDeath() {
 	if s.IsDead() {
 		s.Alive = false
 	}
 }
 
-// World initialization helper.
-func NewWorld(seed int64) *World {
-	return &World{OriginSite: pickOrigin(seed), Seed: seed, CurrentDay: 0}
+// NewWorld initialises world data using deterministic seeding.
+func NewWorld(seed RunSeed, rulesVersion string) *World {
+	origin := pickOrigin(seed.Stream("origin@rules:" + rulesVersion))
+	return &World{OriginSite: origin, Seed: seed, RulesVersion: rulesVersion, CurrentDay: 0}
 }
 
-func pickOrigin(seed int64) string {
+func pickOrigin(stream *Stream) string {
 	sites := []string{
 		"USAMRIID/Fort Detrick (USA)",
 		"Galveston National Lab (USA)",
@@ -330,11 +463,10 @@ func pickOrigin(seed int64) string {
 		"Riems Island Lab (Germany)",
 		"Wuhan Institute of Virology (China)",
 	}
-	r := rand.New(rand.NewSource(seed))
-	return sites[r.Intn(len(sites))]
+	return sites[stream.Intn(len(sites))]
 }
 
-// Example placeholder scene state marshaling.
+// NarrativeState collects survivor info for narration/UI.
 func (s Survivor) NarrativeState() map[string]any {
 	return map[string]any{
 		"name":             s.Name,
@@ -363,9 +495,7 @@ func (s Survivor) NarrativeState() map[string]any {
 }
 
 func narrativeLocalTime(s Survivor) string {
-	// Base reference date (arbitrary stable) 2025-03-01 08:00 UTC
 	base := time.Date(2025, 3, 1, 8, 0, 0, 0, time.UTC).Add(time.Duration(s.Environment.WorldDay) * 24 * time.Hour)
-	// Adjust hour by time-of-day bucket
 	switch s.Environment.TimeOfDay {
 	case "pre-dawn":
 		base = time.Date(base.Year(), base.Month(), base.Day(), 4, 30, 0, 0, time.UTC)
@@ -387,9 +517,14 @@ func narrativeLocalTime(s Survivor) string {
 	return base.In(loc).Format(time.RFC3339)
 }
 
+// NarrativeLocalTime returns the local date-time string used in UI top bar.
+func NarrativeLocalTime(s Survivor) string { return narrativeLocalTime(s) }
+
 // SeedTime returns deterministic time for run day.
-func SeedTime(seed int64, day int) time.Time {
-	return time.Unix(seed, 0).Add(time.Duration(day) * 24 * time.Hour)
+func SeedTime(seed RunSeed, day int) time.Time {
+	// Use lower 63 bits to keep within int64 range.
+	unix := int64(seed.root & 0x7FFFFFFFFFFFFFFF)
+	return time.Unix(unix, 0).Add(time.Duration(day) * 24 * time.Hour)
 }
 
 // SyncEnvironmentDay updates the environment's world day and infection presence.
@@ -402,26 +537,7 @@ func (s *Survivor) updateInfectionPresence() {
 	s.Environment.Infected = s.Environment.WorldDay >= s.Environment.LAD
 }
 
-// clampSkill restricts skill values to the range 0-5.
-func clampSkill(v int) int {
-	if v < 0 {
-		return 0
-	}
-	if v > 5 {
-		return 5
-	}
-	return v
-}
-
-// NormalizeSkills ensures all skills are within the 0-5 range.
-func NormalizeSkills(sk map[Skill]int) {
-	for k, v := range sk {
-		sk[k] = clampSkill(v)
-	}
-}
-
 // Survivor skill advancement logic.
-
 func (s *Survivor) GainSkill(sk Skill, meaningful bool) {
 	if !meaningful {
 		return

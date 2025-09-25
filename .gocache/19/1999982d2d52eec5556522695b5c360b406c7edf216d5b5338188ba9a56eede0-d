@@ -1,0 +1,18 @@
+# test log
+stat assets/events
+stat ../../assets/events
+open ../../assets/events
+stat ../../assets/events/bandage_wound.yaml
+open ../../assets/events/bandage_wound.yaml
+stat ../../assets/events/post_arrival_patrol.yaml
+open ../../assets/events/post_arrival_patrol.yaml
+stat ../../assets/events/rehydrate.yaml
+open ../../assets/events/rehydrate.yaml
+stat ../../assets/events/safehouse_routine.yaml
+open ../../assets/events/safehouse_routine.yaml
+stat ../../assets/events/take_antipyretic.yaml
+open ../../assets/events/take_antipyretic.yaml
+stat ../../assets/events/urban_supply_cache.yaml
+open ../../assets/events/urban_supply_cache.yaml
+stat ../../assets/events/warm_and_dry.yaml
+open ../../assets/events/warm_and_dry.yaml

@@ -1,0 +1,36 @@
+id: street_patrol_contact
+name: Patrol Lanterns
+tier: post_arrival
+rarity: uncommon
+cooldown_scenes: 4
+once_per_run: false
+preconditions:
+  lad_relation: after
+  location_types: ["city", "suburb"]
+  time_of_day: ["evening", "night"]
+choices:
+  - id: evade_patrol
+    label: Fade back into an alley and let the patrol pass.
+    archetypes: ["stealth"]
+    base_risk: moderate
+    base_cost:
+      time_min: 1
+      fatigue: 2
+    gating:
+      skills_min:
+        stealth: 2
+  - id: hail_patrol
+    label: Reveal yourself and hail the patrol for information.
+    archetypes: ["organize"]
+    base_risk: high
+    base_cost:
+      time_min: 1
+      fatigue: 3
+      thirst: 1
+  - id: shadow_patrol
+    label: Shadow the patrol from a distance to map safe paths.
+    archetypes: ["scout"]
+    base_risk: moderate
+    base_cost:
+      time_min: 1
+      fatigue: 4

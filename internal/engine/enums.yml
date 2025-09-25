@@ -35,6 +35,14 @@ meters:
   - noise
   - visibility
   - scent
+  - thirst_streak
+  - hydration_recovery
+  - cold_exposure
+  - fever_rest
+  - fever_medication
+  - warm_streak
+  - exhaustion_scenes
+  - custom_last_turn
 location_types:
   - city
   - suburb

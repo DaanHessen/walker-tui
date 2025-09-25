@@ -1,0 +1,20 @@
+id: take_antipyretic
+name: Take Antipyretic
+tier: any
+rarity: uncommon
+cooldown_scenes: 4
+once_per_run: false
+preconditions:
+  require_conditions: ["fever"]
+choices:
+  - id: swallow_pill
+    label: Take a tablet and sip water.
+    archetypes: ["organize"]
+    base_risk: low
+    base_cost:
+      time_min: 1
+      thirst: 1
+    effects_on_resolve:
+      meters:
+        fever_medication: 8
+
