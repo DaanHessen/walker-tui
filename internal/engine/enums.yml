@@ -8,6 +8,20 @@ traits:
   - paranoid
   - charismatic
   - loner
+  - resilient
+  - analytical
+  - fearless
+  - meticulous
+  - inventive
+  - resourceful
+  - observant
+  - disciplined
+  - steadfast
+  - streetwise
+  - haunted
+  - optimistic
+  - protective
+  - tactician
 skills:
   - combat_melee
   - firearms
@@ -21,6 +35,21 @@ skills:
   - animal_handling
   - driving
   - navigation
+  - communications
+  - demolitions
+  - hacking
+  - negotiation
+  - engineering
+  - agriculture
+  - perception
+  - endurance
+  - cooking
+  - electronics
+  - logistics
+  - sailing
+  - mountaineering
+  - forensics
+  - psychology
 conditions:
   - bleeding
   - fracture
@@ -31,6 +60,15 @@ conditions:
   - dehydration
   - pain
   - poisoning
+  - exhaustion
+  - burns
+  - sprain
+  - radiation
+  - shellshock
+  - malnutrition
+  - concussion
+  - frostbite
+  - sepsis
 meters:
   - noise
   - visibility
@@ -43,6 +81,14 @@ meters:
   - warm_streak
   - exhaustion_scenes
   - custom_last_turn
+  - infection_pressure
+  - panic_level
+  - trust
+  - signal_strength
+  - camp_visibility
+  - stealth_profile
+  - leadership_trust
+  - supply_outlook
 location_types:
   - city
   - suburb
@@ -51,6 +97,14 @@ location_types:
   - coast
   - mountain
   - desert
+  - industrial
+  - subterranean
+  - island
+  - marsh
+  - plateau
+  - tundra
+  - megastructure
+  - canyon
 seasons:
   - spring
   - summer
@@ -63,12 +117,21 @@ weather:
   - storm
   - snow
   - fog
+  - smoke
+  - ashfall
+  - hail
+  - dust_storm
+  - blizzard
+  - heatwave
+  - monsoon
 temp_bands:
   - freezing
   - cold
   - mild
   - warm
   - hot
+  - arctic
+  - scorching
 risk_levels:
   - Low
   - Moderate
@@ -78,3 +141,9 @@ group_types:
   - Duo
   - SmallGroup
   - Community
+  - TaskForce
+  - Convoy
+  - ResearchTeam
+  - TradingCaravan
+  - ReliefColumn
+  - NomadClan

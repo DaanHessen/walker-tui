@@ -46,11 +46,12 @@ Choose wisely. The infection is spreading according to realistic geographic and 
 
 **⚙️ Deep Character Systems**: Skills matter. A technician sees different opportunities than a paramedic. Traits like "cautious" or "impulsive" shape available actions.
 
-**🎨 Beautiful Terminal UI**: Four gorgeous themes (Catppuccin, Dracula, Gruvbox, Solarized Dark) with responsive layouts and smooth interactions.
+**🎨 Beautiful Terminal UI**: Seven curated themes (Catppuccin, Dracula, Gruvbox, Solarized Dark, Nord, Tokyo Night, Everforest) with centered menus, full-width scene layouts, and smooth interactions.
 
 **🎲 Deterministic Chaos**: Every game uses a seed, so interesting worlds can be shared and replayed, but AI narration ensures the stories stay fresh.
 
-**📚 Archive System**: Your fallen survivors become archive cards with AI-generated epitaphs and their most memorable decisions.
+**📚 Archive System**: Your fallen survivors become archive cards with AI-generated epitaphs and their most memorable decisions, browsable across sessions via persistent profiles.
+**📝 Live Logs**: Hit `L` in-game to open the master log overlay. You can also tail logs from another terminal with `psql` (see Observability below).
 
 ## Advanced features
 
@@ -68,6 +69,15 @@ Choose wisely. The infection is spreading according to realistic geographic and 
 - **C**: Cycle themes in real-time
 - **?**: Help and rules reference
 - **Q**: Quit (with auto-save)
+
+## Observability
+
+- In-game: Press `L` to open the master log overlay while you play.
+- Second terminal: export `DATABASE_URL` (or pass `--dsn`) and run:
+  ```bash
+  watch -n 3 'psql "$DATABASE_URL" -At -c "SELECT to_char(created_at, \'HH24:MI:SS\'), narrative_recap FROM master_logs ORDER BY created_at DESC LIMIT 8"'
+  ```
+  The command polls the latest log recaps every three seconds so you can follow the narrative stream in real time.
 
 ## Architecture
 

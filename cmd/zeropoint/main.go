@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	version      = "0.1.0"
-	rulesVersion = "1.0.0"
+	version      = "0.1.0-alpha"
+	rulesVersion = version
 	seedAlphabet = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 )
 

@@ -1,8 +1,8 @@
 package engine
 
 import (
-    "strings"
-    "time"
+	"strings"
+	"time"
 )
 
 // World holds run-wide data.
@@ -53,63 +53,63 @@ type Inventory struct {
 }
 
 type Environment struct {
-    WorldDay  int
-    TimeOfDay string
-    Season    Season
-    Weather   Weather
-    TempBand  TempBand
-    Region    string
-    Location  LocationType
-    LAD       int
-    Infected  bool
-    Timezone  string // IANA timezone identifier
-    DistanceToOriginKM float64 // optional; first survivor ~<=100km; not displayed
+	WorldDay           int
+	TimeOfDay          string
+	Season             Season
+	Weather            Weather
+	TempBand           TempBand
+	Region             string
+	Location           LocationType
+	LAD                int
+	Infected           bool
+	Timezone           string  // IANA timezone identifier
+	DistanceToOriginKM float64 // optional; first survivor ~<=100km; not displayed
 }
 
 // ComputeLAD calculates Local Arrival Day based on distance and modifiers.
 func ComputeLAD(distanceKM float64, hub bool, rural bool, closures bool, evac bool, jitterStream *Stream) int {
-    var baseMin, baseMax int
-    switch {
-    case distanceKM <= 100:
-        baseMin, baseMax = 0, 0 // Tier A immediate
-    case distanceKM <= 800:
-        baseMin, baseMax = 1, 3 // Tier B
-    case distanceKM <= 3000:
-        baseMin, baseMax = 3, 10 // Tier C
-    default:
-        baseMin, baseMax = 7, 21 // Tier D
-    }
-    // start at midpoint
-    lad := (baseMin + baseMax) / 2
-    // hub airport / HSR: -2 (min Day 0 for B+ tiers)
-    if hub {
-        lad -= 2
-        if baseMin > 0 && lad < 0 { // never below day 0 for non-TierA
-            lad = 0
-        }
-    }
-    // rural: +2..+5
-    if rural {
-        lad += 2 + jitterStream.Child("rural").Intn(4) // 2..5
-    }
-    // border closures: +2..+7
-    if closures {
-        lad += 2 + jitterStream.Child("closures").Intn(6) // 2..7
-    }
-    // evacuation routes: -2..-1
-    if evac {
-        lad -= 2 - jitterStream.Child("evac").Intn(2) // -2 or -1
-        if baseMin > 0 && lad < 0 {
-            lad = 0
-        }
-    }
-    if lad < baseMin {
-        lad = baseMin
-    }
-    if lad > baseMax {
-        lad = baseMax
-    }
-    return lad
+	var baseMin, baseMax int
+	switch {
+	case distanceKM <= 100:
+		baseMin, baseMax = 0, 0 // Tier A immediate
+	case distanceKM <= 800:
+		baseMin, baseMax = 1, 3 // Tier B
+	case distanceKM <= 3000:
+		baseMin, baseMax = 3, 10 // Tier C
+	default:
+		baseMin, baseMax = 7, 21 // Tier D
+	}
+	// start at midpoint
+	lad := (baseMin + baseMax) / 2
+	// hub airport / HSR: -2 (min Day 0 for B+ tiers)
+	if hub {
+		lad -= 2
+		if baseMin > 0 && lad < 0 { // never below day 0 for non-TierA
+			lad = 0
+		}
+	}
+	// rural: +2..+5
+	if rural {
+		lad += 2 + jitterStream.Child("rural").Intn(4) // 2..5
+	}
+	// border closures: +2..+7
+	if closures {
+		lad += 2 + jitterStream.Child("closures").Intn(6) // 2..7
+	}
+	// evacuation routes: -2..-1
+	if evac {
+		lad -= 2 - jitterStream.Child("evac").Intn(2) // -2 or -1
+		if baseMin > 0 && lad < 0 {
+			lad = 0
+		}
+	}
+	if lad < baseMin {
+		lad = baseMin
+	}
+	if lad > baseMax {
+		lad = baseMax
+	}
+	return lad
 }
 
 func deriveInitialLAD(stream *Stream, loc LocationType) int {
@@ -155,15 +155,186 @@ type professionTemplate struct {
 	FatigueRange [2]int
 	MoraleRange  [2]int
 	InventoryFn  func(inv *Inventory)
+	SkillBoosts  map[Skill]int
 }
 
 var professionTemplates = []professionTemplate{
-	{"nurse", [2]int{85, 100}, [2]int{20, 35}, [2]int{20, 35}, [2]int{5, 15}, [2]int{55, 70}, func(inv *Inventory) { inv.Medical = append(inv.Medical, "antiseptic") }},
-	{"mechanic", [2]int{90, 105}, [2]int{25, 40}, [2]int{25, 40}, [2]int{10, 20}, [2]int{50, 65}, func(inv *Inventory) { inv.Tools = append(inv.Tools, "wrench") }},
-	{"teacher", [2]int{80, 95}, [2]int{20, 35}, [2]int{20, 35}, [2]int{5, 15}, [2]int{60, 75}, func(inv *Inventory) { inv.Special = append(inv.Special, "notebook") }},
-	{"police_officer", [2]int{95, 110}, [2]int{25, 40}, [2]int{25, 40}, [2]int{10, 20}, [2]int{50, 65}, func(inv *Inventory) { inv.Weapons = append(inv.Weapons, "baton") }},
-	{"farmer", [2]int{90, 105}, [2]int{15, 30}, [2]int{20, 35}, [2]int{5, 15}, [2]int{55, 70}, func(inv *Inventory) { inv.Tools = append(inv.Tools, "multi tool") }},
-	{"student", [2]int{75, 90}, [2]int{20, 35}, [2]int{20, 35}, [2]int{5, 15}, [2]int{60, 80}, func(inv *Inventory) { inv.Memento = "photo" }},
+	{
+		Name:         "nurse",
+		HealthRange:  [2]int{85, 100},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Medical = append(inv.Medical, "antiseptic")
+			inv.Tools = append(inv.Tools, "stethoscope")
+		},
+		SkillBoosts: map[Skill]int{SkillMedicine: 3, SkillPsychology: 1, SkillEndurance: 1},
+	},
+	{
+		Name:         "mechanic",
+		HealthRange:  [2]int{90, 105},
+		HungerRange:  [2]int{25, 40},
+		ThirstRange:  [2]int{25, 40},
+		FatigueRange: [2]int{10, 20},
+		MoraleRange:  [2]int{50, 65},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "socket set")
+			inv.Special = append(inv.Special, "spare fuses")
+		},
+		SkillBoosts: map[Skill]int{SkillTechnical: 3, SkillEngineering: 2, SkillCrafting: 1},
+	},
+	{
+		Name:         "teacher",
+		HealthRange:  [2]int{80, 95},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{60, 75},
+		InventoryFn:  func(inv *Inventory) { inv.Special = append(inv.Special, "lesson planner") },
+		SkillBoosts:  map[Skill]int{SkillLeadership: 1, SkillCommunications: 2, SkillPsychology: 1},
+	},
+	{
+		Name:         "police_officer",
+		HealthRange:  [2]int{95, 110},
+		HungerRange:  [2]int{25, 40},
+		ThirstRange:  [2]int{25, 40},
+		FatigueRange: [2]int{10, 20},
+		MoraleRange:  [2]int{50, 65},
+		InventoryFn: func(inv *Inventory) {
+			inv.Weapons = append(inv.Weapons, "baton")
+			inv.Tools = append(inv.Tools, "zip ties")
+		},
+		SkillBoosts: map[Skill]int{SkillCombatMelee: 2, SkillFirearms: 2, SkillLeadership: 1},
+	},
+	{
+		Name:         "farmer",
+		HealthRange:  [2]int{90, 105},
+		HungerRange:  [2]int{15, 30},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "multi tool")
+			inv.Special = append(inv.Special, "seed packets")
+		},
+		SkillBoosts: map[Skill]int{SkillAgriculture: 3, SkillSurvival: 1, SkillCooking: 1},
+	},
+	{
+		Name:         "student",
+		HealthRange:  [2]int{75, 90},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{60, 80},
+		InventoryFn:  func(inv *Inventory) { inv.Memento = "photo"; inv.Special = append(inv.Special, "laptop") },
+		SkillBoosts:  map[Skill]int{SkillLogistics: 1, SkillNavigation: 1, SkillPsychology: 1},
+	},
+	{
+		Name:         "paramedic",
+		HealthRange:  [2]int{88, 102},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{8, 20},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Medical = append(inv.Medical, "trauma kit")
+			inv.Tools = append(inv.Tools, "headlamp")
+		},
+		SkillBoosts: map[Skill]int{SkillMedicine: 4, SkillPsychology: 1, SkillDriving: 1},
+	},
+	{
+		Name:         "firefighter",
+		HealthRange:  [2]int{100, 115},
+		HungerRange:  [2]int{25, 40},
+		ThirstRange:  [2]int{25, 40},
+		FatigueRange: [2]int{10, 22},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "fire axe")
+			inv.Special = append(inv.Special, "thermal blanket")
+		},
+		SkillBoosts: map[Skill]int{SkillEndurance: 2, SkillLogistics: 1, SkillCombatMelee: 1},
+	},
+	{
+		Name:         "chef",
+		HealthRange:  [2]int{85, 100},
+		HungerRange:  [2]int{15, 30},
+		ThirstRange:  [2]int{15, 30},
+		FatigueRange: [2]int{5, 18},
+		MoraleRange:  [2]int{60, 80},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "chef knife")
+			inv.Special = append(inv.Special, "spice tin")
+		},
+		SkillBoosts: map[Skill]int{SkillCooking: 4, SkillLogistics: 1, SkillPerception: 1},
+	},
+	{
+		Name:         "systems_engineer",
+		HealthRange:  [2]int{80, 95},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "multimeter")
+			inv.Special = append(inv.Special, "diagnostic tablet")
+		},
+		SkillBoosts: map[Skill]int{SkillElectronics: 3, SkillTechnical: 3},
+	},
+	{
+		Name:         "sailor",
+		HealthRange:  [2]int{90, 105},
+		HungerRange:  [2]int{25, 40},
+		ThirstRange:  [2]int{25, 40},
+		FatigueRange: [2]int{8, 18},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "rigging knife")
+			inv.Special = append(inv.Special, "weather radio")
+		},
+		SkillBoosts: map[Skill]int{SkillSailing: 4, SkillNavigation: 2, SkillSurvival: 1},
+	},
+	{
+		Name:         "mountaineer",
+		HealthRange:  [2]int{90, 108},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{8, 18},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "climbing kit")
+			inv.Special = append(inv.Special, "rope coils")
+		},
+		SkillBoosts: map[Skill]int{SkillMountaineering: 4, SkillSurvival: 2, SkillEndurance: 1},
+	},
+	{
+		Name:         "investigative_journalist",
+		HealthRange:  [2]int{80, 95},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 18},
+		MoraleRange:  [2]int{60, 78},
+		InventoryFn: func(inv *Inventory) {
+			inv.Special = append(inv.Special, "voice recorder")
+			inv.Tools = append(inv.Tools, "camera")
+		},
+		SkillBoosts: map[Skill]int{SkillForensics: 2, SkillCommunications: 3, SkillStealth: 1},
+	},
+	{
+		Name:         "quartermaster",
+		HealthRange:  [2]int{85, 100},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "ledger")
+			inv.Special = append(inv.Special, "supply manifest")
+		},
+		SkillBoosts: map[Skill]int{SkillLogistics: 4, SkillLeadership: 2, SkillNegotiation: 1},
+	},
 }
 
 func pickProfession(stream *Stream) professionTemplate {
@@ -196,7 +367,9 @@ func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
 		worldDay = -9 + roleStream.Child("researcher-day").Intn(10)
 	}
 
-	traits := selectTraits(stream.Child("traits"), 2)
+	traitStream := stream.Child("traits")
+	traitCount := 2 + traitStream.Child("count").Intn(2)
+	traits := selectTraits(traitStream, traitCount)
 	skills := baselineSkills()
 	loc := LocationSuburb
 	if researcher {
@@ -209,6 +382,22 @@ func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
 	prof.InventoryFn(&inv)
 	if researcher {
 		inv.Tools = []string{"lab badge"}
+		if prof.SkillBoosts == nil {
+			prof.SkillBoosts = make(map[Skill]int)
+		}
+		if prof.SkillBoosts[SkillTechnical] < 2 {
+			prof.SkillBoosts[SkillTechnical] = 2
+		}
+		if prof.SkillBoosts[SkillMedicine] < 1 {
+			prof.SkillBoosts[SkillMedicine] = 1
+		}
+	}
+	if prof.SkillBoosts != nil {
+		for sk, lvl := range prof.SkillBoosts {
+			if lvl > skills[sk] {
+				skills[sk] = lvl
+			}
+		}
 	}
 
 	statsStream := stream.Child("stats")
@@ -226,23 +415,27 @@ func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
 	zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago"}
 	zone := zones[zoneStream.Intn(len(zones))]
 
-    // derive a non-revealing region label for UI
-    regionLabel := generalRegion(originRegion, stream.Child("region-label"))
-    env := Environment{
-        WorldDay:  worldDay,
-        TimeOfDay: initialTOD(stream.Child("tod")),
-        Season:    SeasonSpring,
-        Weather:   WeatherClear,
-        TempBand:  TempMild,
-        Region:    regionLabel,
-        Location:  loc,
-        LAD:       lad,
-        Infected:  worldDay >= lad,
-        Timezone:  zone,
-        DistanceToOriginKM: stream.Child("origin-distance").Float64()*100.0, // 0..100
-    }
+	// derive a non-revealing region label for UI
+	regionLabel := generalRegion(originRegion, stream.Child("region-label"))
+	seasonStream := stream.Child("season")
+	season := randomSeason(seasonStream)
+	weather := randomWeather(seasonStream.Child("weather"), season)
+	tempBand := tempBandForSeason(seasonStream.Child("temp"), season)
+	env := Environment{
+		WorldDay:           worldDay,
+		TimeOfDay:          initialTOD(stream.Child("tod")),
+		Season:             season,
+		Weather:            weather,
+		TempBand:           tempBand,
+		Region:             regionLabel,
+		Location:           loc,
+		LAD:                lad,
+		Infected:           worldDay >= lad,
+		Timezone:           zone,
+		DistanceToOriginKM: stream.Child("origin-distance").Float64() * 100.0, // 0..100
+	}
 
-    survivor := Survivor{
+	survivor := Survivor{
 		Name:        fullName,
 		Age:         18 + stream.Child("age").Intn(38),
 		Background:  prof.Name,
@@ -253,7 +446,7 @@ func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
 		Traits:      traits,
 		Skills:      skills,
 		Stats:       stats,
-		BodyTemp:    TempMild,
+		BodyTemp:    tempBand,
 		Conditions:  nil,
 		Meters:      baselineMeters(),
 		Inventory:   inv,
@@ -270,8 +463,10 @@ func initialTOD(stream *Stream) string {
 
 // NewGenericSurvivor generates a replacement survivor using broader randomization.
 func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survivor {
-    traits := selectTraits(stream.Child("traits"), 2)
-    skills := baselineSkills()
+	traitStream := stream.Child("traits")
+	traitCount := 2 + traitStream.Child("count").Intn(2)
+	traits := selectTraits(traitStream, traitCount)
+	skills := baselineSkills()
 	groupStream := stream.Child("group")
 	groups := []GroupType{GroupSolo, GroupDuo, GroupSmallGroup}
 	g := groups[groupStream.Intn(len(groups))]
@@ -283,13 +478,20 @@ func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survi
 		gSize = 3 + groupStream.Child("size").Intn(3)
 	}
 
-	locs := []LocationType{LocationCity, LocationSuburb, LocationRural}
+	locs := []LocationType{LocationCity, LocationSuburb, LocationRural, LocationForest, LocationCoast, LocationIndustrial, LocationMegastructure, LocationCanyon}
 	loc := locs[stream.Child("location").Intn(len(locs))]
 	lad := deriveInitialLAD(stream.Child("lad"), loc)
 
 	prof := pickProfession(stream.Child("profession"))
 	inv := baseInventory(stream.Child("inventory"))
 	prof.InventoryFn(&inv)
+	if prof.SkillBoosts != nil {
+		for sk, lvl := range prof.SkillBoosts {
+			if lvl > skills[sk] {
+				skills[sk] = lvl
+			}
+		}
+	}
 
 	statsStream := stream.Child("stats")
 	stats := Stats{
@@ -300,12 +502,16 @@ func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survi
 		Morale:  randIn(statsStream.Child("morale"), prof.MoraleRange),
 	}
 
-    nameStream := stream.Child("name")
-    fullName := randomName(nameStream) + " " + randomSurname(nameStream)
-    zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago", "Australia/Sydney"}
-    zone := zones[stream.Child("timezone").Intn(len(zones))]
-    // generic survivors may be anywhere in the world
-    regionLabel := pickWorldRegion(stream.Child("world-region"))
+	nameStream := stream.Child("name")
+	fullName := randomName(nameStream) + " " + randomSurname(nameStream)
+	zones := []string{"UTC", "America/New_York", "Europe/London", "Asia/Shanghai", "Europe/Berlin", "America/Chicago", "Australia/Sydney"}
+	zone := zones[stream.Child("timezone").Intn(len(zones))]
+	// generic survivors may be anywhere in the world
+	regionLabel := pickWorldRegion(stream.Child("world-region"))
+	seasonStream := stream.Child("season")
+	season := randomSeason(seasonStream)
+	weather := randomWeather(seasonStream.Child("weather"), season)
+	tempBand := tempBandForSeason(seasonStream.Child("temp"), season)
 
 	survivor := Survivor{
 		Name:       fullName,
@@ -318,17 +524,17 @@ func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survi
 		Traits:     traits,
 		Skills:     skills,
 		Stats:      stats,
-		BodyTemp:   TempMild,
+		BodyTemp:   tempBand,
 		Conditions: nil,
 		Meters:     baselineMeters(),
 		Inventory:  inv,
 		Environment: Environment{
 			WorldDay:  worldDay,
 			TimeOfDay: initialTOD(stream.Child("tod")),
-			Season:    SeasonSpring,
-			Weather:   WeatherClear,
-			TempBand:  TempMild,
-			Region:    originRegion,
+			Season:    season,
+			Weather:   weather,
+			TempBand:  tempBand,
+			Region:    regionLabel,
 			Location:  loc,
 			LAD:       lad,
 			Infected:  worldDay >= lad,
@@ -374,6 +580,9 @@ func baselineMeters() map[Meter]int {
 		MeterWarmStreak:        0,
 		MeterExhaustionScenes:  0,
 		MeterCustomLastTurn:    -10,
+		MeterStealthProfile:    0,
+		MeterLeadershipTrust:   0,
+		MeterSupplyOutlook:     0,
 	}
 }
 
@@ -390,42 +599,86 @@ func baseInventory(stream *Stream) Inventory {
 
 // generalRegion maps a hidden origin site string to a non-revealing coarse region label.
 func generalRegion(origin string, stream *Stream) string {
-    // Attempt to read country from parentheses
-    country := ""
-    if i := strings.LastIndex(origin, "("); i >= 0 && strings.HasSuffix(origin, ")") {
-        country = strings.TrimSuffix(origin[i+1:], ")")
-    }
-    switch country {
-    case "USA":
-        labs := []string{"Mid-Atlantic, USA", "Gulf Coast, USA", "Midwest, USA"}
-        return labs[stream.Intn(len(labs))]
-    case "UK":
-        opts := []string{"Southern England, UK", "Western England, UK"}
-        return opts[stream.Intn(len(opts))]
-    case "Germany":
-        opts := []string{"Northern Germany", "Western Germany"}
-        return opts[stream.Intn(len(opts))]
-    case "China":
-        opts := []string{"Central China", "Eastern China"}
-        return opts[stream.Intn(len(opts))]
-    case "Russia":
-        opts := []string{"Western Russia"}
-        return opts[stream.Intn(len(opts))]
-    default:
-        // Fallback coarse label
-        return "Unknown Region"
-    }
+	// Attempt to read country from parentheses
+	country := ""
+	if i := strings.LastIndex(origin, "("); i >= 0 && strings.HasSuffix(origin, ")") {
+		country = strings.TrimSuffix(origin[i+1:], ")")
+	}
+	switch country {
+	case "USA":
+		labs := []string{"Mid-Atlantic, USA", "Gulf Coast, USA", "Midwest, USA"}
+		return labs[stream.Intn(len(labs))]
+	case "UK":
+		opts := []string{"Southern England, UK", "Western England, UK"}
+		return opts[stream.Intn(len(opts))]
+	case "Germany":
+		opts := []string{"Northern Germany", "Western Germany"}
+		return opts[stream.Intn(len(opts))]
+	case "China":
+		opts := []string{"Central China", "Eastern China"}
+		return opts[stream.Intn(len(opts))]
+	case "Russia":
+		opts := []string{"Western Russia"}
+		return opts[stream.Intn(len(opts))]
+	default:
+		// Fallback coarse label
+		return "Unknown Region"
+	}
 }
 
 // pickWorldRegion selects a broad world region label for replacement survivors.
 func pickWorldRegion(stream *Stream) string {
-    regions := []string{
-        "Northeast USA", "West Coast USA", "Great Plains USA",
-        "Western Europe", "Northern Europe", "Southern Europe",
-        "Eastern Europe", "Central China", "Eastern China", "South Asia",
-        "Southeast Asia", "Oceania", "South America", "North Africa",
-    }
-    return regions[stream.Intn(len(regions))]
+	regions := []string{
+		"Northeast USA", "West Coast USA", "Great Plains USA",
+		"Western Europe", "Northern Europe", "Southern Europe",
+		"Eastern Europe", "Central China", "Eastern China", "South Asia",
+		"Southeast Asia", "Oceania", "South America", "North Africa",
+	}
+	return regions[stream.Intn(len(regions))]
+}
+
+func randomSeason(stream *Stream) Season {
+	return AllSeasons[stream.Intn(len(AllSeasons))]
+}
+
+func randomWeather(stream *Stream, season Season) Weather {
+	var options []Weather
+	switch season {
+	case SeasonWinter:
+		options = []Weather{WeatherSnow, WeatherBlizzard, WeatherClear, WeatherOvercast, WeatherFog}
+	case SeasonSummer:
+		options = []Weather{WeatherClear, WeatherHeatwave, WeatherRain, WeatherStorm, WeatherDustStorm}
+	case SeasonAutumn:
+		options = []Weather{WeatherRain, WeatherFog, WeatherOvercast, WeatherClear, WeatherStorm}
+	default:
+		options = []Weather{WeatherRain, WeatherClear, WeatherOvercast, WeatherMonsoon, WeatherFog}
+	}
+	return options[stream.Intn(len(options))]
+}
+
+func tempBandForSeason(stream *Stream, season Season) TempBand {
+	switch season {
+	case SeasonWinter:
+		if stream.Intn(2) == 0 {
+			return TempCold
+		}
+		return TempFreezing
+	case SeasonSummer:
+		if stream.Intn(3) == 0 {
+			return TempScorching
+		}
+		return TempWarm
+	case SeasonAutumn:
+		if stream.Intn(2) == 0 {
+			return TempMild
+		}
+		return TempCold
+	default:
+		if stream.Intn(2) == 0 {
+			return TempMild
+		}
+		return TempWarm
+	}
 }
 
 // AdvanceDay increments global day.

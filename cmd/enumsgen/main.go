@@ -50,11 +50,15 @@ func main() {
 	writeEnum(&buf, "Condition", s.Conditions)
 	writeEnum(&buf, "Meter", s.Meters)
 	writeEnum(&buf, "LocationType", s.Location)
+	writeAliases(&buf, "Location", "LocationType", s.Location)
 	writeEnum(&buf, "Season", s.Seasons)
 	writeEnum(&buf, "Weather", s.Weather)
 	writeEnum(&buf, "TempBand", s.TempBands)
+	writeAliases(&buf, "Temp", "TempBand", s.TempBands)
 	writeEnum(&buf, "RiskLevel", s.RiskLevels)
+	writeAliases(&buf, "Risk", "RiskLevel", s.RiskLevels)
 	writeEnum(&buf, "GroupType", s.GroupTypes)
+	writeAliases(&buf, "Group", "GroupType", s.GroupTypes)
 	w(`// Generic helpers
 func contains[T ~string](list []T, v T) bool { for _, x := range list { if x==v { return true } }; return false }
 `)
@@ -100,6 +104,18 @@ func writeEnum(buf *bytes.Buffer, typeName string, values []string) {
 		fmt.Fprintf(buf, "%s", constIdent(typeName, v))
 	}
 	buf.WriteString("}\n\n")
+}
+
+func writeAliases(buf *bytes.Buffer, aliasPrefix, targetType string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	sort.Strings(values)
+	fmt.Fprintf(buf, "const (\n")
+	for _, v := range values {
+		fmt.Fprintf(buf, "\t%s = %s\n", constIdent(aliasPrefix, v), constIdent(targetType, v))
+	}
+	fmt.Fprintf(buf, ")\n\n")
 }
 
 func constIdent(prefix, raw string) string {

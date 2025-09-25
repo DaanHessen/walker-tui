@@ -115,7 +115,12 @@ func (d *DeepSeek) PlanEvent(ctx context.Context, req engine.DirectorRequest) (e
 			backoff(attempt)
 			continue
 		}
-		cleaned := sanitizeOutput(raw)
+		cleaned := strings.TrimSpace(sanitizeOutput(raw))
+		if cleaned == "" {
+			lastErr = errors.New("deepseek returned an empty planner response (timeout)")
+			backoff(attempt)
+			continue
+		}
 		if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
 			lastErr = fmt.Errorf("director json parse: %w", err)
 			if attempt == 2 {

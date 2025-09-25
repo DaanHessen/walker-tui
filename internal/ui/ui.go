@@ -78,6 +78,7 @@ type newGameInput struct {
 	Theme        string
 	RulesVersion string
 	DebugLAD     bool
+	Profile      store.Profile
 }
 
 func defaultTips() []string {
@@ -91,7 +92,9 @@ func defaultTips() []string {
 }
 
 type styleSet struct {
+	canvas         lipgloss.Style
 	title          lipgloss.Style
+	subtitle       lipgloss.Style
 	topBar         lipgloss.Style
 	bottomBar      lipgloss.Style
 	menuBox        lipgloss.Style
@@ -99,6 +102,7 @@ type styleSet struct {
 	menuItemActive lipgloss.Style
 	scene          lipgloss.Style
 	sidebar        lipgloss.Style
+	panel          lipgloss.Style
 	accent         lipgloss.Style
 	muted          lipgloss.Style
 	borderColor    lipgloss.Color
@@ -136,6 +140,7 @@ type model struct {
 	turn           int
 	deaths         int
 	view           string
+	overlayReturn  string
 	logs           []store.MasterLog
 	archives       []store.ArchiveCard
 	settings       store.Settings
@@ -208,15 +213,22 @@ func (m *model) applyTheme(name string) {
 	p := paletteFor(name)
 	m.themeName = name
 	m.palette = p
+	canvas := lipgloss.NewStyle().Background(p.Background).Foreground(p.Text)
+	panel := lipgloss.NewStyle().Background(p.Panel).Foreground(p.Text)
+	menuBox := panel.Copy().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(p.Border).Padding(1, 3)
+	menuItem := lipgloss.NewStyle().Foreground(p.Text)
 	m.styles = styleSet{
+		canvas:         canvas,
 		title:          lipgloss.NewStyle().Bold(true).Foreground(p.Accent),
-		topBar:         lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).Bold(true).Padding(0, 1),
-		bottomBar:      lipgloss.NewStyle().Background(p.Surface).Foreground(p.Muted).Padding(0, 1),
-		menuBox:        lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(p.Border).Background(p.Surface).Foreground(p.Text).Padding(1, 2),
-		menuItem:       lipgloss.NewStyle().Foreground(p.Text),
-		menuItemActive: lipgloss.NewStyle().Foreground(p.Accent).Bold(true),
-		scene:          lipgloss.NewStyle().Foreground(p.Text),
-		sidebar:        lipgloss.NewStyle().Foreground(p.Text),
+		subtitle:       lipgloss.NewStyle().Foreground(p.Muted),
+		topBar:         lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).Bold(true).Padding(0, 2),
+		bottomBar:      lipgloss.NewStyle().Background(p.Surface).Foreground(p.Muted).Padding(0, 2),
+		menuBox:        menuBox,
+		menuItem:       menuItem,
+		menuItemActive: menuItem.Copy().Foreground(p.Accent).Bold(true),
+		scene:          panel.Copy().Padding(1, 2),
+		sidebar:        panel.Copy().Padding(1, 1),
+		panel:          panel,
 		accent:         lipgloss.NewStyle().Foreground(p.Accent),
 		muted:          lipgloss.NewStyle().Foreground(p.Muted),
 		borderColor:    p.Border,
@@ -226,6 +238,25 @@ func (m *model) applyTheme(name string) {
 		riskModerate:   lipgloss.NewStyle().Foreground(p.Warning).Bold(true),
 		riskHigh:       lipgloss.NewStyle().Foreground(p.AccentAlt).Bold(true),
 	}
+}
+
+func (m *model) openOverlay(view string) {
+	if m.view == view {
+		return
+	}
+	if m.overlayReturn == "" {
+		m.overlayReturn = m.view
+	}
+	m.view = view
+}
+
+func (m *model) closeOverlay(fallback string) {
+	if m.overlayReturn != "" {
+		m.view = m.overlayReturn
+		m.overlayReturn = ""
+		return
+	}
+	m.view = fallback
 }
 
 func (m *model) newGameCommand(input newGameInput) tea.Cmd {
@@ -262,6 +293,9 @@ func runNewGame(ctx context.Context, db *store.DB, narrator text.Narrator, plann
 	if planner == nil || narrator == nil {
 		return result, errors.New("deepseek client unavailable")
 	}
+	if input.Profile.ID == uuid.Nil {
+		return result, errors.New("profile id required")
+	}
 	seed, err := engine.NewRunSeed(strings.TrimSpace(input.SeedText))
 	if err != nil {
 		return result, err
@@ -280,6 +314,7 @@ func runNewGame(ctx context.Context, db *store.DB, narrator text.Narrator, plann
 		preRunSeedBuffer: strings.TrimSpace(input.SeedText),
 		preRunTheme:      input.Theme,
 		runSeed:          seed,
+		activeProfile:    input.Profile,
 	}
 	temp.applyTheme(input.Theme)
 	temp.world = engine.NewWorld(seed, input.RulesVersion)
@@ -507,6 +542,7 @@ func (m *model) startNewGame() tea.Cmd {
 	m.loadingMessage = "Preparing new survivor..."
 	m.spinnerFrame = 0
 	m.view = viewLoading
+	m.overlayReturn = ""
 	if len(m.tips) == 0 {
 		m.tips = defaultTips()
 	}
@@ -522,6 +558,7 @@ func (m *model) startNewGame() tea.Cmd {
 		Theme:        m.preRunTheme,
 		RulesVersion: m.rulesVersion,
 		DebugLAD:     m.debugLAD,
+		Profile:      m.activeProfile,
 	}
 	return tea.Batch(m.newGameCommand(inputCfg), m.spinnerTickCmd(), m.tipTickCmd())
 }
@@ -587,6 +624,7 @@ func (m *model) continueGame() {
 	}
 	_ = store.NewProfileRepo(m.db).Touch(m.ctx, m.activeProfile.ID)
 	m.view = viewScene
+	m.overlayReturn = ""
 }
 
 // newSceneTx inserts scene + choices transactionally, renders markdown.
@@ -727,6 +765,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scenesToday = res.ScenesToday
 		m.timeline = res.Timeline
 		m.view = viewScene
+		m.overlayReturn = ""
 		m.loadingMessage = ""
 		m.loadingTip = ""
 		m.md = m.renderSceneLayout()
@@ -754,7 +793,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		k := msg.String()
-		if k == "ctrl+c" || (k == "q" && !m.preRunSeedEditing) {
+		norm := strings.ToLower(k)
+		if norm == "ctrl+c" || (norm == "q" && !m.preRunSeedEditing) {
 			return m, tea.Quit
 		}
 		if m.view == viewProfile {
@@ -799,7 +839,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			switch k {
+			switch norm {
 			case "up", "k":
 				if m.profileIndex > 0 {
 					m.profileIndex--
@@ -826,7 +866,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.view == viewError {
-			switch k {
+			switch norm {
 			case "enter", "esc", " ":
 				m.view = viewMainMenu
 			}
@@ -834,7 +874,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// timeline navigation
 		if m.view == viewTimeline {
-			switch k {
+			switch norm {
 			case "pgdown", "ctrl+f":
 				m.timelineScroll += 12
 			case "pgup", "ctrl+b":
@@ -848,7 +888,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "end":
 				m.timelineScroll = 1 << 30
 			case "esc", "q":
-				m.view = viewScene
+				m.closeOverlay(viewScene)
 			}
 			if m.timelineScroll < 0 {
 				m.timelineScroll = 0
@@ -856,25 +896,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// global key for timeline
-		if k == "y" {
-			m.view = viewTimeline
+		if norm == "y" {
+			m.openOverlay(viewTimeline)
 			return m, nil
 		}
-		if k == "esc" {
+		if norm == "esc" {
 			switch m.view {
-			case viewHelp, viewSettings:
-				m.view = viewScene
-				return m, nil
-			case viewArchive:
-				m.view = viewScene
+			case viewHelp, viewSettings, viewArchive, viewLog:
+				m.closeOverlay(viewScene)
 				return m, nil
 			case viewWorldConfig:
-				m.view = viewMainMenu
+				m.closeOverlay(viewMainMenu)
 				return m, nil
 			}
 		}
 		if m.view == viewMainMenu {
-			switch k {
+			switch norm {
 			case "1":
 				if cmd := m.startNewGame(); cmd != nil {
 					return m, cmd
@@ -882,9 +919,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "2":
 				m.continueGame()
 			case "3":
-				m.view = viewWorldConfig
+				m.openOverlay(viewWorldConfig)
 			case "5":
-				m.view = viewHelp
+				m.openOverlay(viewHelp)
 			case "p":
 				m.view = viewProfile
 			}
@@ -900,7 +937,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.view == viewArchive {
-			switch k {
+			switch norm {
 			case "up", "k":
 				if m.archiveIndex > 0 {
 					m.archiveIndex--
@@ -915,13 +952,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.archiveDetail {
 					m.archiveDetail = false
 				} else {
-					m.view = viewScene
+					m.closeOverlay(viewScene)
 				}
 			}
 			return m, nil
 		}
 		if m.view == viewSettings {
-			switch k {
+			switch norm {
 			case "g":
 				m.cycleLanguage()
 			case "c":
@@ -929,25 +966,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		switch k {
+		switch norm {
 		case "tab":
 			m.cyclePrimaryViews()
 		case "l":
-			m.view = viewLog
+			m.openOverlay(viewLog)
 			m.refreshLogs()
 		case "a":
-			m.view = viewArchive
+			m.openOverlay(viewArchive)
 			m.refreshArchives()
 		case "s":
-			m.view = viewSettings
+			m.openOverlay(viewSettings)
 			m.refreshSettings()
 		case "m":
+			m.overlayReturn = ""
 			m.view = viewMainMenu
 		case "?":
 			if m.view == viewHelp {
-				m.view = viewScene
+				m.closeOverlay(viewScene)
 			} else {
-				m.view = viewHelp
+				m.openOverlay(viewHelp)
 			}
 		case "t":
 			if m.view == viewSettings {
@@ -1015,32 +1053,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // Layout rendering -----------------------------------------------------------
 func (m *model) renderSceneLayout() string {
-	// Dimensions
 	w := m.width
-	if w <= 0 {
-		w = 100
+	if w < 92 {
+		w = 92
 	}
-	sidebarWidth := 30
-	if w < 90 {
-		sidebarWidth = 24
+	height := m.height
+	if height < 26 {
+		height = 26
 	}
-	mainWidth := w - sidebarWidth - 1
-
-	// Build components
-	top := m.renderTopBar()
-	scenePanel := lipgloss.JoinVertical(lipgloss.Left,
-		m.renderCharacterSummary(mainWidth-2),
-		"",
-		m.renderSceneNarrative(mainWidth-2),
-		"",
-		m.renderChoicesSection(mainWidth-2),
-	)
+	mainWidth := int(float64(w) * 0.62)
+	if mainWidth < 52 {
+		mainWidth = 52
+	}
+	if mainWidth > w-32 {
+		mainWidth = w - 32
+	}
+	sidebarWidth := w - mainWidth - 2
+	if sidebarWidth < 28 {
+		sidebarWidth = 28
+		mainWidth = w - sidebarWidth - 2
+	}
+	mainSectionWidth := mainWidth - 4
+	if mainSectionWidth < 32 {
+		mainSectionWidth = mainWidth - 2
+	}
+	sideSectionWidth := sidebarWidth - 4
+	if sideSectionWidth < 24 {
+		sideSectionWidth = sidebarWidth - 2
+	}
+	mainSections := []string{
+		m.renderCharacterSummary(mainSectionWidth),
+		m.renderSceneNarrative(mainSectionWidth),
+		m.renderChoicesSection(mainSectionWidth),
+	}
+	scenePanel := lipgloss.JoinVertical(lipgloss.Left, mainSections...)
 	sceneLines := strings.Split(scenePanel, "\n")
-	availHeight := m.height - 4
-	if availHeight < 5 {
+	availHeight := height - 6
+	if availHeight < 8 {
 		availHeight = len(sceneLines)
 	}
-	if availHeight > 0 && len(sceneLines) > availHeight {
+	if len(sceneLines) > availHeight {
 		m.maxScroll = len(sceneLines) - availHeight
 		if m.scrollOffset < 0 {
 			m.scrollOffset = 0
@@ -1048,36 +1100,49 @@ func (m *model) renderSceneLayout() string {
 		if m.scrollOffset > m.maxScroll {
 			m.scrollOffset = m.maxScroll
 		}
-		sceneLines = sceneLines[m.scrollOffset : m.scrollOffset+availHeight]
+		start := m.scrollOffset
+		end := start + availHeight
+		if end > len(sceneLines) {
+			end = len(sceneLines)
+		}
+		scenePanel = strings.Join(sceneLines[start:end], "\n")
 	} else {
 		m.scrollOffset = 0
 		m.maxScroll = 0
+		scenePanel = strings.Join(sceneLines, "\n")
 	}
-	scenePanel = strings.Join(sceneLines, "\n")
 	main := m.styles.scene.Copy().Width(mainWidth).Render(scenePanel)
 	sideSections := []string{
-		m.renderStatsSection(sidebarWidth - 2),
-		m.renderSkillsSection(sidebarWidth - 2),
-		m.renderConditionsSection(sidebarWidth - 2),
-		m.renderInventorySection(sidebarWidth - 2),
+		m.renderStatsSection(sideSectionWidth),
+		m.renderSkillsSection(sideSectionWidth),
+		m.renderConditionsSection(sideSectionWidth),
+		m.renderInventorySection(sideSectionWidth),
 	}
-	if meters := m.renderMetersSection(sidebarWidth - 2); meters != "" {
+	if meters := m.renderMetersSection(sideSectionWidth); meters != "" {
 		sideSections = append(sideSections, meters)
 	}
 	side := m.styles.sidebar.Copy().Width(sidebarWidth).Render(strings.Join(sideSections, "\n\n"))
-	body := lipgloss.JoinHorizontal(lipgloss.Top, main, side)
+	gap := m.styles.canvas.Copy().Width(2).Render("  ")
+	body := lipgloss.JoinHorizontal(lipgloss.Top, main, gap, side)
+	top := m.renderTopBar()
 	bottom := m.renderBottomBar()
-	return lipgloss.JoinVertical(lipgloss.Left, top, body, bottom)
+	content := lipgloss.JoinVertical(lipgloss.Left, top, body, bottom)
+	lines := strings.Split(content, "\n")
+	if len(lines) < height {
+		padding := strings.Repeat("\n", height-len(lines))
+		content += padding
+	}
+	return m.styles.canvas.Copy().Width(w).Render(content)
 }
 
 func (m *model) renderLoading() string {
 	width := m.width
-	if width < 50 {
-		width = 50
+	if width < 60 {
+		width = 60
 	}
 	height := m.height
-	if height < 10 {
-		height = 10
+	if height < 18 {
+		height = 18
 	}
 	spinner := ""
 	if len(spinnerFrames) > 0 {
@@ -1091,19 +1156,32 @@ func (m *model) renderLoading() string {
 	if tip == "" && len(m.tips) > 0 {
 		tip = m.tips[m.tipIndex%len(m.tips)]
 	}
-	inner := fmt.Sprintf("%s %s\n\nTip: %s", m.styles.accent.Render(spinner), message, tip)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
-		m.styles.menuBox.Width(width/2).Render(inner))
+	boxWidth := width / 2
+	if boxWidth < 48 {
+		boxWidth = 48
+	}
+	status := fmt.Sprintf("[%s] %s", spinner, message)
+	inner := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.accent.Render(status),
+		"",
+		m.styles.muted.Render("Tip: "+tip),
+	)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(inner)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func (m *model) renderErrorScreen() string {
 	width := m.width
-	if width < 60 {
-		width = 60
+	if width < 64 {
+		width = 64
 	}
 	height := m.height
-	if height < 12 {
-		height = 12
+	if height < 18 {
+		height = 18
 	}
 	title := m.errorTitle
 	if title == "" {
@@ -1118,14 +1196,30 @@ func (m *model) renderErrorScreen() string {
 		m.styles.title.Render(title),
 		m.styles.muted.Render(msg),
 	)
-	box := m.styles.menuBox.Width(56).Render(body)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	boxWidth := width - 16
+	if boxWidth > 70 {
+		boxWidth = 70
+	}
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func (m *model) sectionBox(title, body string, width int) string {
-	header := m.styles.title.Render(title)
-	content := lipgloss.JoinVertical(lipgloss.Left, header, body)
-	return lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).BorderForeground(m.styles.borderColor).Padding(0, 1).Width(width).Render(content)
+	if width < 16 {
+		width = 16
+	}
+	header := m.styles.accent.Copy().Bold(true).Render(strings.ToUpper(title))
+	innerWidth := width - 4
+	if innerWidth < 4 {
+		innerWidth = width
+	}
+	bodyStyled := lipgloss.NewStyle().Width(innerWidth).Render(body)
+	content := lipgloss.JoinVertical(lipgloss.Left, header, bodyStyled)
+	return m.styles.panel.Copy().BorderStyle(lipgloss.NormalBorder()).BorderForeground(m.styles.borderColor).Padding(0, 1).Width(width).Render(content)
 }
 
 func (m *model) renderCharacterSummary(width int) string {
@@ -1312,12 +1406,16 @@ func (m *model) renderTopBar() string {
 	if w <= 0 {
 		w = 100
 	}
-	gap := w - len(left) - len(right)
-	if gap < 1 {
-		gap = 1
+	innerWidth := w - 4
+	if innerWidth < 1 {
+		innerWidth = w
 	}
-	bar := left + strings.Repeat(" ", gap) + right
-	return m.styles.topBar.Render(bar)
+	space := innerWidth - lipgloss.Width(left) - lipgloss.Width(right)
+	if space < 1 {
+		space = 1
+	}
+	bar := left + strings.Repeat(" ", space) + right
+	return m.styles.topBar.Copy().Width(w).Render(bar)
 }
 
 func (m *model) renderBottomBar() string {
@@ -1339,62 +1437,88 @@ func (m *model) renderBottomBar() string {
 	if w <= 0 {
 		w = 100
 	}
-	if len(line) > w {
-		if w > 10 {
-			line = line[:w-3] + "..."
-		}
+	innerWidth := w - 4
+	if innerWidth < 1 {
+		innerWidth = w
 	}
-	return m.styles.bottomBar.Render(left + "\n" + line)
+	leftLine := m.styles.bottomBar.Copy().Width(w).Render(left)
+	rightLine := line
+	if lipgloss.Width(line) > innerWidth {
+		rightLine = lipgloss.NewStyle().Width(innerWidth).Render(line)
+	}
+	second := m.styles.bottomBar.Copy().Width(w).Render(rightLine)
+	return leftLine + "\n" + second
 }
 
 // Main menu rendering.
 func (m *model) renderMainMenu() string {
 	width := m.width
-	if width < 50 {
-		width = 50
+	if width < 70 {
+		width = 70
 	}
 	height := m.height
-	if height < 12 {
-		height = 12
+	if height < 22 {
+		height = 22
 	}
-	header := m.styles.title.Render("ZERO POINT — MAIN MENU")
-	options := []string{
-		"Profile: " + func() string {
-			if m.activeProfile.ID == uuid.Nil {
-				return "<select profile>"
-			}
-			return m.activeProfile.Name
-		}(),
-		"",
+	profileName := "<select profile>"
+	if m.activeProfile.ID != uuid.Nil {
+		profileName = m.activeProfile.Name
+	}
+	header := m.styles.title.Render("ZERO POINT")
+	sub := m.styles.subtitle.Render("DeepSeek-driven survival anthology")
+	profileLine := fmt.Sprintf("Profile: %s", profileName)
+	menuItems := []string{
 		"[1] New Game",
 		"[2] Continue Game",
 		"[3] World Settings",
 		"[4] Survivor Archive",
 		"[5] About / Rules",
-		"",
+	}
+	styledMenu := make([]string, len(menuItems))
+	for i, item := range menuItems {
+		styledMenu[i] = m.styles.menuItem.Render(item)
+	}
+	extra := []string{
 		"P Switch Profile",
 		"Q Quit",
 	}
 	if m.startupErr != nil {
-		msg := m.errorMessage
+		msg := strings.TrimSpace(m.errorMessage)
 		if msg == "" {
 			msg = "DeepSeek API key missing."
 		}
-		options = append(options, "", m.styles.muted.Render(msg))
+		extra = append(extra, "", m.styles.muted.Render(msg))
 	}
-	body := strings.Join(options, "\n")
-	box := m.styles.menuBox.Width(46).Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	menuWidth := width - 12
+	if menuWidth > 68 {
+		menuWidth = 68
+	}
+	menu := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		sub,
+		"",
+		m.styles.muted.Render(profileLine),
+		"",
+		strings.Join(styledMenu, "\n"),
+		"",
+		m.styles.muted.Render(strings.Join(extra, "\n")),
+	)
+	box := m.styles.menuBox.Copy().Width(menuWidth).Render(menu)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func (m *model) renderWorldConfig() string {
 	width := m.width
-	if width < 68 {
-		width = 68
+	if width < 72 {
+		width = 72
 	}
 	height := m.height
-	if height < 14 {
-		height = 14
+	if height < 20 {
+		height = 20
 	}
 	seedHint := "Press Enter to edit (Esc to cancel)."
 	if m.preRunSeedEditing {
@@ -1404,22 +1528,36 @@ func (m *model) renderWorldConfig() string {
 	if m.preRunScarcity {
 		scar = "On"
 	}
-	lines := []string{
-		"WORLD SETTINGS (Pre-Run)",
-		"",
+	seedBody := lipgloss.JoinVertical(lipgloss.Left,
 		fmt.Sprintf("Seed [%d/%d]", len(m.preRunSeedBuffer), maxSeedLength),
 		m.styles.accent.Render(m.preRunSeedBuffer),
 		m.styles.muted.Render(seedHint),
-		"",
-		fmt.Sprintf("Scarcity: %s %s", scar, m.styles.muted.Render("(press 1 to toggle)")),
-		fmt.Sprintf("Text Density: %s %s", m.preRunDensity, m.styles.muted.Render("(press 2 to cycle)")),
-		fmt.Sprintf("Theme: %s %s", m.preRunTheme, m.styles.muted.Render("(press 3 to cycle)")),
-		"",
-		m.styles.muted.Render("Use Backspace while editing. Press Esc to return."),
+	)
+	optionsBody := lipgloss.JoinVertical(lipgloss.Left,
+		fmt.Sprintf("Scarcity: %s %s", scar, m.styles.muted.Render("(press 1)")),
+		fmt.Sprintf("Text Density: %s %s", m.preRunDensity, m.styles.muted.Render("(press 2)")),
+		fmt.Sprintf("Theme: %s %s", m.preRunTheme, m.styles.muted.Render("(press 3)")),
+	)
+	boxWidth := width - 14
+	if boxWidth > 70 {
+		boxWidth = 70
 	}
-	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	box := m.styles.menuBox.Width(66).Render(body)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.title.Render("World Settings"),
+		m.styles.subtitle.Render("Configure the next survivor."),
+		"",
+		m.sectionBox("Seed", seedBody, boxWidth-6),
+		"",
+		m.sectionBox("Options", optionsBody, boxWidth-6),
+		"",
+		m.styles.muted.Render("Backspace edits the seed. Esc returns."),
+	)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func cycleDensityLocal(cur string) string {
@@ -1443,8 +1581,14 @@ func (m *model) cyclePrimaryViews() {
 			break
 		}
 	}
-	m.view = order[(cur+1)%len(order)]
-	switch m.view {
+	next := order[(cur+1)%len(order)]
+	if next == viewScene {
+		m.overlayReturn = ""
+		m.view = viewScene
+		return
+	}
+	m.openOverlay(next)
+	switch next {
 	case viewLog:
 		m.refreshLogs()
 	case viewArchive:
@@ -1814,77 +1958,155 @@ func isRuneInput(s string) bool {
 
 // Interactive archive rendering -----------------------------------------------------------
 func (m *model) renderArchive() string {
+	width := m.width
+	if width < 80 {
+		width = 80
+	}
+	height := m.height
+	if height < 24 {
+		height = 24
+	}
+	boxWidth := width - 12
+	if boxWidth > 76 {
+		boxWidth = 76
+	}
 	if len(m.archives) == 0 {
-		return "Archive\n(no cards yet)\nEsc to return"
+		body := lipgloss.JoinVertical(lipgloss.Left,
+			m.styles.title.Render("Survivor Archive"),
+			m.styles.muted.Render("No archive cards yet."),
+			m.styles.muted.Render("Esc to return."),
+		)
+		box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+		placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+			lipgloss.WithWhitespaceForeground(m.palette.Text),
+			lipgloss.WithWhitespaceBackground(m.palette.Background),
+		)
+		return m.styles.canvas.Render(placed)
 	}
 	if m.archiveDetail {
 		ac := m.archives[m.archiveIndex]
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("ARCHIVE DETAIL (%d/%d)\n", m.archiveIndex+1, len(m.archives)))
-		b.WriteString(fmt.Sprintf("Day %d  Region %s  Cause %s\n", ac.WorldDay, ac.Region, ac.CauseOfDeath))
-		b.WriteString("Skills: ")
-		if len(ac.Skills) == 0 {
-			b.WriteString("(none)")
-		} else {
-			b.WriteString(strings.Join(ac.Skills, ", "))
-		}
-		b.WriteString("\nRecent: ")
-		if len(ac.NotableDecisions) == 0 {
-			b.WriteString("(none)")
-		} else {
-			b.WriteString(strings.Join(ac.NotableDecisions, " | "))
-		}
-		b.WriteString("\n\nCard:\n")
-		b.WriteString(ac.Markdown)
-		b.WriteString("\n\nEnter toggle list  Esc back")
-		return b.String()
+		detail := lipgloss.JoinVertical(lipgloss.Left,
+			fmt.Sprintf("Day %d • Region %s • Cause %s", ac.WorldDay, ac.Region, ac.CauseOfDeath),
+			fmt.Sprintf("Skills: %s", formatList(ac.Skills)),
+			fmt.Sprintf("Notable: %s", formatList(ac.NotableDecisions)),
+			"",
+			ac.Markdown,
+			"",
+			m.styles.muted.Render("Enter returns to list. Esc back."),
+		)
+		body := m.sectionBox(fmt.Sprintf("Archive %d of %d", m.archiveIndex+1, len(m.archives)), detail, boxWidth-6)
+		outer := m.styles.menuBox.Copy().Width(boxWidth).Render(lipgloss.JoinVertical(lipgloss.Left, m.styles.title.Render("Survivor Archive"), "", body))
+		placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, outer,
+			lipgloss.WithWhitespaceForeground(m.palette.Text),
+			lipgloss.WithWhitespaceBackground(m.palette.Background),
+		)
+		return m.styles.canvas.Render(placed)
 	}
-	var b strings.Builder
-	b.WriteString("ARCHIVE (Up/Down, Enter view, Esc back)\n")
+	var rows []string
 	for i, ac := range m.archives {
-		cursor := "  "
+		tag := fmt.Sprintf("Day %-3d %s", ac.WorldDay, ac.Region)
+		row := fmt.Sprintf("%s  %s", tag, ac.CauseOfDeath)
 		if i == m.archiveIndex {
-			cursor = "> "
+			row = m.styles.menuItemActive.Render("▶ ") + m.styles.menuItem.Render(row)
+		} else {
+			row = "  " + m.styles.menuItem.Render(row)
 		}
-		b.WriteString(fmt.Sprintf("%sDay %-3d %-18s %s\n", cursor, ac.WorldDay, ac.Region, ac.CauseOfDeath))
+		rows = append(rows, row)
 	}
-	return b.String()
+	list := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.title.Render("Survivor Archive"),
+		m.styles.muted.Render("Up/Down select, Enter view, Esc back."),
+		"",
+		m.sectionBox("Cards", list, boxWidth-6),
+	)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func (m *model) renderHelp() string {
 	width := m.width
-	if width < 76 {
-		width = 76
+	if width < 78 {
+		width = 78
 	}
 	height := m.height
-	if height < 18 {
-		height = 18
+	if height < 22 {
+		height = 22
 	}
-	lines := []string{
-		"ABOUT / RULES",
-		"",
-		fmt.Sprintf("Seed & Rules: %s • %s", m.runSeed.Text, m.rulesVersion),
-		"",
+	boxWidth := width - 14
+	if boxWidth > 74 {
+		boxWidth = 74
+	}
+	rulesBody := lipgloss.JoinVertical(lipgloss.Left,
 		"Zero Point is a sequential survival anthology directed by DeepSeek.",
 		m.styles.muted.Render("Maintain health, hunger, thirst, fatigue, and morale."),
-		m.styles.muted.Render("Infected threats appear only after Local Arrival Day (LAD)."),
-		m.styles.muted.Render("Choose one action each turn (1-6) or enter a concise custom verb."),
-		m.styles.muted.Render("Outcomes adjust stats; death archives the survivor and the timeline continues."),
-		"",
-		"Controls:",
+		m.styles.muted.Render("Infected threats appear after Local Arrival Day (LAD)."),
+		m.styles.muted.Render("Choose one action each turn or enter a concise custom verb."),
+		m.styles.muted.Render("Outcomes adjust stats; death archives the survivor and play continues."),
+	)
+	controlsBody := lipgloss.JoinVertical(lipgloss.Left,
 		m.styles.muted.Render("1-6 choose action   Enter commit custom input   Tab cycle views"),
 		m.styles.muted.Render("L logs   A archive   S settings   Y timeline   E export run"),
 		m.styles.muted.Render("T scarcity   D density   C theme   F6 toggle LAD debug"),
 		m.styles.muted.Render("Press ? or Esc to return."),
-	}
-	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	box := m.styles.menuBox.Width(72).Render(body)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	)
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.title.Render("About / Rules"),
+		m.styles.subtitle.Render(fmt.Sprintf("Seed %s • Rules %s", m.runSeed.Text, m.rulesVersion)),
+		"",
+		m.sectionBox("Survival Brief", rulesBody, boxWidth-6),
+		"",
+		m.sectionBox("Controls", controlsBody, boxWidth-6),
+	)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func (m *model) renderSettings() string {
-	return fmt.Sprintf("Settings\nSeed & Rules: %s • %s\nScarcity: %v (t toggle)\nDensity: %s (d cycle)\nTheme: %s (c cycle)\nLanguage: %s (g cycle placeholder)\n",
-		m.runSeed.Text, m.rulesVersion, m.settings.Scarcity, m.settings.TextDensity, m.settings.Theme, m.settings.Language)
+	width := m.width
+	if width < 70 {
+		width = 70
+	}
+	height := m.height
+	if height < 20 {
+		height = 20
+	}
+	boxWidth := width - 14
+	if boxWidth > 72 {
+		boxWidth = 72
+	}
+	scarValue := "Off"
+	if m.settings.Scarcity {
+		scarValue = "On"
+	}
+	current := lipgloss.JoinVertical(lipgloss.Left,
+		fmt.Sprintf("Seed: %s", m.runSeed.Text),
+		fmt.Sprintf("Rules: %s", m.rulesVersion),
+		fmt.Sprintf("Scarcity: %s (press T)", scarValue),
+		fmt.Sprintf("Text Density: %s (press D)", m.settings.TextDensity),
+		fmt.Sprintf("Theme: %s (press C)", m.settings.Theme),
+		fmt.Sprintf("Language: %s (press G)", m.settings.Language),
+	)
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.title.Render("Current Settings"),
+		m.sectionBox("Run", current, boxWidth-6),
+		"",
+		m.styles.muted.Render("Settings update instantly. Esc returns."),
+	)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 // --- Added implementations to fix missing methods ---
@@ -1901,7 +2123,7 @@ func (m *model) renderTimeline() string {
 	if h <= 0 {
 		h = 30
 	}
-	avail := h - 2
+	avail := h - 6
 	if avail < 1 {
 		avail = len(lines)
 	}
@@ -1925,47 +2147,67 @@ func (m *model) renderTimeline() string {
 		}
 		view = lines[start:end]
 	}
-	return title + "\n" + strings.Join(view, "\n")
+	body := strings.Join(view, "\n")
+	boxWidth := w - 12
+	if boxWidth > 80 {
+		boxWidth = 80
+	}
+	rendered := lipgloss.JoinVertical(lipgloss.Left, m.styles.title.Render(title), body)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(rendered)
+	placed := lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 func (m *model) renderProfileSelect() string {
 	width := m.width
-	if width < 68 {
-		width = 68
+	if width < 72 {
+		width = 72
 	}
 	height := m.height
-	if height < 16 {
-		height = 16
+	if height < 22 {
+		height = 22
 	}
-	var lines []string
-	lines = append(lines, "PROFILE SELECT")
-	lines = append(lines, "")
+	var entries []string
 	if len(m.profiles) == 0 {
-		lines = append(lines, "(no profiles found)")
+		entries = append(entries, m.styles.muted.Render("(no profiles found)"))
 	} else {
 		for i, p := range m.profiles {
-			cursor := "  "
+			label := p.Name
 			if i == m.profileIndex {
-				cursor = "> "
+				label = m.styles.menuItemActive.Render("▶ ") + m.styles.menuItem.Render(label)
+			} else {
+				label = "  " + m.styles.menuItem.Render(label)
 			}
-			lines = append(lines, cursor+p.Name)
+			entries = append(entries, label)
 		}
 	}
 	if m.profileEditing {
-		lines = append(lines, "")
-		lines = append(lines, "New profile: "+m.styles.accent.Render(m.profileInput))
-		lines = append(lines, m.styles.muted.Render("Enter to create, Esc to cancel."))
+		entries = append(entries, "", "New profile: "+m.styles.accent.Render(m.profileInput), m.styles.muted.Render("Enter to create, Esc to cancel."))
 	} else {
-		lines = append(lines, "")
-		lines = append(lines, m.styles.muted.Render("Up/Down to choose, Enter to confirm, N to create."))
+		entries = append(entries, "", m.styles.muted.Render("Up/Down to choose, Enter to confirm, N to create."))
 	}
 	if msg := strings.TrimSpace(m.profileMessage); msg != "" {
-		lines = append(lines, "")
-		lines = append(lines, m.styles.muted.Render(msg))
+		entries = append(entries, "", m.styles.muted.Render(msg))
 	}
-	body := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	box := m.styles.menuBox.Width(60).Render(body)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	boxWidth := width - 16
+	if boxWidth > 68 {
+		boxWidth = 68
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.title.Render("Select Profile"),
+		m.styles.subtitle.Render("Profiles keep your runs and settings."),
+		"",
+		strings.Join(entries, "\n"),
+	)
+	box := m.styles.menuBox.Copy().Width(boxWidth).Render(body)
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceForeground(m.palette.Text),
+		lipgloss.WithWhitespaceBackground(m.palette.Background),
+	)
+	return m.styles.canvas.Render(placed)
 }
 
 // cycleLanguage is a placeholder; persist a stable value or simple cycle.
