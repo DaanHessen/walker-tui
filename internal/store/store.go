@@ -159,6 +159,100 @@ type SurvivorRepo struct{ db *DB }
 
 func NewSurvivorRepo(db *DB) *SurvivorRepo { return &SurvivorRepo{db: db} }
 
+func hydrateSurvivorRecord(
+	name string,
+	age int,
+	background string,
+	region string,
+	locationType string,
+	groupType string,
+	groupSize int,
+	traitArr pq.StringArray,
+	skillsJSON []byte,
+	statsJSON []byte,
+	bodyTemp string,
+	conditionArr pq.StringArray,
+	metersJSON []byte,
+	inventoryJSON []byte,
+	environmentJSON []byte,
+	alive bool,
+) (engine.Survivor, error) {
+	sv := engine.Survivor{
+		Name:       name,
+		Age:        age,
+		Background: background,
+		Region:     region,
+		Location:   engine.LocationType(locationType),
+		Group:      engine.GroupType(groupType),
+		GroupSize:  groupSize,
+		BodyTemp:   engine.TempBand(bodyTemp),
+		Alive:      alive,
+	}
+	if len(traitArr) > 0 {
+		sv.Traits = make([]engine.Trait, 0, len(traitArr))
+		for _, raw := range traitArr {
+			trait := engine.Trait(raw)
+			if trait.Validate() {
+				sv.Traits = append(sv.Traits, trait)
+			}
+		}
+	}
+	if len(conditionArr) > 0 {
+		sv.Conditions = make([]engine.Condition, 0, len(conditionArr))
+		for _, raw := range conditionArr {
+			cond := engine.Condition(raw)
+			if cond.Validate() {
+				sv.Conditions = append(sv.Conditions, cond)
+			}
+		}
+	}
+	if len(statsJSON) > 0 {
+		if err := json.Unmarshal(statsJSON, &sv.Stats); err != nil {
+			return engine.Survivor{}, err
+		}
+	}
+	// skills baseline covers all known skills
+	skillMap := map[string]int{}
+	if len(skillsJSON) > 0 {
+		if err := json.Unmarshal(skillsJSON, &skillMap); err != nil {
+			return engine.Survivor{}, err
+		}
+	}
+	sv.Skills = make(map[engine.Skill]int, len(engine.AllSkills))
+	for _, sk := range engine.AllSkills {
+		if v, ok := skillMap[string(sk)]; ok {
+			sv.Skills[sk] = v
+		} else {
+			sv.Skills[sk] = 0
+		}
+	}
+	meterMap := map[string]int{}
+	if len(metersJSON) > 0 {
+		if err := json.Unmarshal(metersJSON, &meterMap); err != nil {
+			return engine.Survivor{}, err
+		}
+	}
+	if len(meterMap) > 0 {
+		sv.Meters = make(map[engine.Meter]int, len(meterMap))
+		for k, v := range meterMap {
+			sv.Meters[engine.Meter(k)] = v
+		}
+	} else {
+		sv.Meters = make(map[engine.Meter]int)
+	}
+	if len(inventoryJSON) > 0 {
+		if err := json.Unmarshal(inventoryJSON, &sv.Inventory); err != nil {
+			return engine.Survivor{}, err
+		}
+	}
+	if len(environmentJSON) > 0 {
+		if err := json.Unmarshal(environmentJSON, &sv.Environment); err != nil {
+			return engine.Survivor{}, err
+		}
+	}
+	return sv, nil
+}
+
 func (s *SurvivorRepo) Create(ctx context.Context, runID uuid.UUID, sv engine.Survivor) (uuid.UUID, error) {
 	id := uuid.New()
 	skills, _ := json.Marshal(sv.Skills)
@@ -379,19 +473,19 @@ func (r *RunRepo) GetLatestRun(ctx context.Context, profileID uuid.UUID) (Run, e
 
 // SurvivorRepo additions
 func (s *SurvivorRepo) Get(ctx context.Context, id uuid.UUID) (engine.Survivor, error) {
-	row := s.db.gorm.Raw(`SELECT name, age, background, region, location_type, group_type, group_size, traits, skills, stats, body_temp, conditions, meters, inventory, environment, alive FROM survivors WHERE id = ?`, id).Row()
+	row := s.db.gorm.WithContext(ctx).Raw(`SELECT name, age, background, region, location_type, group_type, group_size, traits, skills, stats, body_temp, conditions, meters, inventory, environment, alive FROM survivors WHERE id = ?`, id).Row()
 	var (
 		name, background, region, locationType, groupType, bodyTemp string
 		age, groupSize                                              int
-		traits, conditions                                          []byte
+		traits pq.StringArray
+		conditions pq.StringArray
 		skillsB, statsB, metersB, invB, envB                        []byte
 		alive                                                       bool
 	)
 	if err := row.Scan(&name, &age, &background, &region, &locationType, &groupType, &groupSize, &traits, &skillsB, &statsB, &bodyTemp, &conditions, &metersB, &invB, &envB, &alive); err != nil {
 		return engine.Survivor{}, err
 	}
-	// Minimal unmarshal for now (omitted for brevity) – return placeholder.
-	return engine.Survivor{Name: name, Age: age, Background: background, Region: region, Location: engine.LocationType(locationType), Group: engine.GroupType(groupType), GroupSize: groupSize, Alive: alive}, nil
+	return hydrateSurvivorRecord(name, age, background, region, locationType, groupType, groupSize, traits, skillsB, statsB, bodyTemp, conditions, metersB, invB, envB, alive)
 }
 
 // GetAliveSurvivor returns latest alive survivor for run (simple max updated_at ordering).

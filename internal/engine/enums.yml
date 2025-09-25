@@ -1,5 +1,7 @@
 # Central enum definitions for Zero Point.
 traits:
+  - adaptive
+  - altruistic
   - cautious
   - impulsive
   - stoic
@@ -10,19 +12,28 @@ traits:
   - loner
   - resilient
   - analytical
+  - calculating
   - fearless
   - meticulous
   - inventive
   - resourceful
   - observant
   - disciplined
+  - driven
+  - hardy
+  - methodical
   - steadfast
+  - skeptical
   - streetwise
   - haunted
   - optimistic
   - protective
   - tactician
+  - tireless
+  - unflappable
+  - reckless
 skills:
+  - aeronautics
   - combat_melee
   - firearms
   - stealth
@@ -32,22 +43,31 @@ skills:
   - leadership
   - technical
   - crafting
+  - botany
   - animal_handling
+  - cartography
+  - chemistry
   - driving
   - navigation
   - communications
+  - diplomacy
   - demolitions
   - hacking
   - negotiation
   - engineering
   - agriculture
+  - linguistics
+  - mechanics
   - perception
   - endurance
   - cooking
   - electronics
+  - pharmacology
   - logistics
+  - piloting
   - sailing
   - mountaineering
+  - strategy
   - forensics
   - psychology
 conditions:
@@ -69,6 +89,9 @@ conditions:
   - concussion
   - frostbite
   - sepsis
+  - contamination
+  - lung_damage
+  - nerve_damage
 meters:
   - noise
   - visibility
@@ -89,7 +112,12 @@ meters:
   - stealth_profile
   - leadership_trust
   - supply_outlook
+  - community_sentiment
+  - fortification_integrity
+  - radiation_exposure
+  - supply_buffer
 location_types:
+  - airport
   - city
   - suburb
   - rural
@@ -105,6 +133,9 @@ location_types:
   - tundra
   - megastructure
   - canyon
+  - harbor
+  - research_outpost
+  - stronghold
 seasons:
   - spring
   - summer
@@ -147,3 +178,6 @@ group_types:
   - TradingCaravan
   - ReliefColumn
   - NomadClan
+  - RescueSquad
+  - ScoutWing
+  - SanctuaryOrder

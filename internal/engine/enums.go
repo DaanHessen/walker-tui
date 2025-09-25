@@ -5,42 +5,57 @@ package engine
 type Trait string
 
 const (
+	TraitAdaptive    Trait = "adaptive"
+	TraitAltruistic  Trait = "altruistic"
 	TraitAnalytical  Trait = "analytical"
+	TraitCalculating Trait = "calculating"
 	TraitCautious    Trait = "cautious"
 	TraitCharismatic Trait = "charismatic"
 	TraitDisciplined Trait = "disciplined"
+	TraitDriven      Trait = "driven"
 	TraitEmpathetic  Trait = "empathetic"
 	TraitFearless    Trait = "fearless"
+	TraitHardy       Trait = "hardy"
 	TraitHaunted     Trait = "haunted"
 	TraitImpulsive   Trait = "impulsive"
 	TraitInventive   Trait = "inventive"
 	TraitLoner       Trait = "loner"
+	TraitMethodical  Trait = "methodical"
 	TraitMeticulous  Trait = "meticulous"
 	TraitObservant   Trait = "observant"
 	TraitOptimistic  Trait = "optimistic"
 	TraitParanoid    Trait = "paranoid"
 	TraitPragmatic   Trait = "pragmatic"
 	TraitProtective  Trait = "protective"
+	TraitReckless    Trait = "reckless"
 	TraitResilient   Trait = "resilient"
 	TraitResourceful Trait = "resourceful"
+	TraitSkeptical   Trait = "skeptical"
 	TraitSteadfast   Trait = "steadfast"
 	TraitStoic       Trait = "stoic"
 	TraitStreetwise  Trait = "streetwise"
 	TraitTactician   Trait = "tactician"
+	TraitTireless    Trait = "tireless"
+	TraitUnflappable Trait = "unflappable"
 )
 
-var AllTraits = []Trait{TraitAnalytical, TraitCautious, TraitCharismatic, TraitDisciplined, TraitEmpathetic, TraitFearless, TraitHaunted, TraitImpulsive, TraitInventive, TraitLoner, TraitMeticulous, TraitObservant, TraitOptimistic, TraitParanoid, TraitPragmatic, TraitProtective, TraitResilient, TraitResourceful, TraitSteadfast, TraitStoic, TraitStreetwise, TraitTactician}
+var AllTraits = []Trait{TraitAdaptive, TraitAltruistic, TraitAnalytical, TraitCalculating, TraitCautious, TraitCharismatic, TraitDisciplined, TraitDriven, TraitEmpathetic, TraitFearless, TraitHardy, TraitHaunted, TraitImpulsive, TraitInventive, TraitLoner, TraitMethodical, TraitMeticulous, TraitObservant, TraitOptimistic, TraitParanoid, TraitPragmatic, TraitProtective, TraitReckless, TraitResilient, TraitResourceful, TraitSkeptical, TraitSteadfast, TraitStoic, TraitStreetwise, TraitTactician, TraitTireless, TraitUnflappable}
 
 type Skill string
 
 const (
+	SkillAeronautics    Skill = "aeronautics"
 	SkillAgriculture    Skill = "agriculture"
 	SkillAnimalHandling Skill = "animal_handling"
+	SkillBotany         Skill = "botany"
+	SkillCartography    Skill = "cartography"
+	SkillChemistry      Skill = "chemistry"
 	SkillCombatMelee    Skill = "combat_melee"
 	SkillCommunications Skill = "communications"
 	SkillCooking        Skill = "cooking"
 	SkillCrafting       Skill = "crafting"
 	SkillDemolitions    Skill = "demolitions"
+	SkillDiplomacy      Skill = "diplomacy"
 	SkillDriving        Skill = "driving"
 	SkillElectronics    Skill = "electronics"
 	SkillEndurance      Skill = "endurance"
@@ -49,111 +64,131 @@ const (
 	SkillForensics      Skill = "forensics"
 	SkillHacking        Skill = "hacking"
 	SkillLeadership     Skill = "leadership"
+	SkillLinguistics    Skill = "linguistics"
 	SkillLogistics      Skill = "logistics"
+	SkillMechanics      Skill = "mechanics"
 	SkillMedicine       Skill = "medicine"
 	SkillMountaineering Skill = "mountaineering"
 	SkillNavigation     Skill = "navigation"
 	SkillNegotiation    Skill = "negotiation"
 	SkillPerception     Skill = "perception"
+	SkillPharmacology   Skill = "pharmacology"
+	SkillPiloting       Skill = "piloting"
 	SkillPsychology     Skill = "psychology"
 	SkillSailing        Skill = "sailing"
 	SkillScavenging     Skill = "scavenging"
 	SkillStealth        Skill = "stealth"
+	SkillStrategy       Skill = "strategy"
 	SkillSurvival       Skill = "survival"
 	SkillTechnical      Skill = "technical"
 )
 
-var AllSkills = []Skill{SkillAgriculture, SkillAnimalHandling, SkillCombatMelee, SkillCommunications, SkillCooking, SkillCrafting, SkillDemolitions, SkillDriving, SkillElectronics, SkillEndurance, SkillEngineering, SkillFirearms, SkillForensics, SkillHacking, SkillLeadership, SkillLogistics, SkillMedicine, SkillMountaineering, SkillNavigation, SkillNegotiation, SkillPerception, SkillPsychology, SkillSailing, SkillScavenging, SkillStealth, SkillSurvival, SkillTechnical}
+var AllSkills = []Skill{SkillAeronautics, SkillAgriculture, SkillAnimalHandling, SkillBotany, SkillCartography, SkillChemistry, SkillCombatMelee, SkillCommunications, SkillCooking, SkillCrafting, SkillDemolitions, SkillDiplomacy, SkillDriving, SkillElectronics, SkillEndurance, SkillEngineering, SkillFirearms, SkillForensics, SkillHacking, SkillLeadership, SkillLinguistics, SkillLogistics, SkillMechanics, SkillMedicine, SkillMountaineering, SkillNavigation, SkillNegotiation, SkillPerception, SkillPharmacology, SkillPiloting, SkillPsychology, SkillSailing, SkillScavenging, SkillStealth, SkillStrategy, SkillSurvival, SkillTechnical}
 
 type Condition string
 
 const (
-	ConditionBleeding     Condition = "bleeding"
-	ConditionBurns        Condition = "burns"
-	ConditionConcussion   Condition = "concussion"
-	ConditionDehydration  Condition = "dehydration"
-	ConditionExhaustion   Condition = "exhaustion"
-	ConditionFever        Condition = "fever"
-	ConditionFracture     Condition = "fracture"
-	ConditionFrostbite    Condition = "frostbite"
-	ConditionHeatstroke   Condition = "heatstroke"
-	ConditionHypothermia  Condition = "hypothermia"
-	ConditionInfection    Condition = "infection"
-	ConditionMalnutrition Condition = "malnutrition"
-	ConditionPain         Condition = "pain"
-	ConditionPoisoning    Condition = "poisoning"
-	ConditionRadiation    Condition = "radiation"
-	ConditionSepsis       Condition = "sepsis"
-	ConditionShellshock   Condition = "shellshock"
-	ConditionSprain       Condition = "sprain"
+	ConditionBleeding      Condition = "bleeding"
+	ConditionBurns         Condition = "burns"
+	ConditionConcussion    Condition = "concussion"
+	ConditionContamination Condition = "contamination"
+	ConditionDehydration   Condition = "dehydration"
+	ConditionExhaustion    Condition = "exhaustion"
+	ConditionFever         Condition = "fever"
+	ConditionFracture      Condition = "fracture"
+	ConditionFrostbite     Condition = "frostbite"
+	ConditionHeatstroke    Condition = "heatstroke"
+	ConditionHypothermia   Condition = "hypothermia"
+	ConditionInfection     Condition = "infection"
+	ConditionLungDamage    Condition = "lung_damage"
+	ConditionMalnutrition  Condition = "malnutrition"
+	ConditionNerveDamage   Condition = "nerve_damage"
+	ConditionPain          Condition = "pain"
+	ConditionPoisoning     Condition = "poisoning"
+	ConditionRadiation     Condition = "radiation"
+	ConditionSepsis        Condition = "sepsis"
+	ConditionShellshock    Condition = "shellshock"
+	ConditionSprain        Condition = "sprain"
 )
 
-var AllConditions = []Condition{ConditionBleeding, ConditionBurns, ConditionConcussion, ConditionDehydration, ConditionExhaustion, ConditionFever, ConditionFracture, ConditionFrostbite, ConditionHeatstroke, ConditionHypothermia, ConditionInfection, ConditionMalnutrition, ConditionPain, ConditionPoisoning, ConditionRadiation, ConditionSepsis, ConditionShellshock, ConditionSprain}
+var AllConditions = []Condition{ConditionBleeding, ConditionBurns, ConditionConcussion, ConditionContamination, ConditionDehydration, ConditionExhaustion, ConditionFever, ConditionFracture, ConditionFrostbite, ConditionHeatstroke, ConditionHypothermia, ConditionInfection, ConditionLungDamage, ConditionMalnutrition, ConditionNerveDamage, ConditionPain, ConditionPoisoning, ConditionRadiation, ConditionSepsis, ConditionShellshock, ConditionSprain}
 
 type Meter string
 
 const (
-	MeterCampVisibility    Meter = "camp_visibility"
-	MeterColdExposure      Meter = "cold_exposure"
-	MeterCustomLastTurn    Meter = "custom_last_turn"
-	MeterExhaustionScenes  Meter = "exhaustion_scenes"
-	MeterFeverMedication   Meter = "fever_medication"
-	MeterFeverRest         Meter = "fever_rest"
-	MeterHydrationRecovery Meter = "hydration_recovery"
-	MeterInfectionPressure Meter = "infection_pressure"
-	MeterLeadershipTrust   Meter = "leadership_trust"
-	MeterNoise             Meter = "noise"
-	MeterPanicLevel        Meter = "panic_level"
-	MeterScent             Meter = "scent"
-	MeterSignalStrength    Meter = "signal_strength"
-	MeterStealthProfile    Meter = "stealth_profile"
-	MeterSupplyOutlook     Meter = "supply_outlook"
-	MeterThirstStreak      Meter = "thirst_streak"
-	MeterTrust             Meter = "trust"
-	MeterVisibility        Meter = "visibility"
-	MeterWarmStreak        Meter = "warm_streak"
+	MeterCampVisibility         Meter = "camp_visibility"
+	MeterColdExposure           Meter = "cold_exposure"
+	MeterCommunitySentiment     Meter = "community_sentiment"
+	MeterCustomLastTurn         Meter = "custom_last_turn"
+	MeterExhaustionScenes       Meter = "exhaustion_scenes"
+	MeterFeverMedication        Meter = "fever_medication"
+	MeterFeverRest              Meter = "fever_rest"
+	MeterFortificationIntegrity Meter = "fortification_integrity"
+	MeterHydrationRecovery      Meter = "hydration_recovery"
+	MeterInfectionPressure      Meter = "infection_pressure"
+	MeterLeadershipTrust        Meter = "leadership_trust"
+	MeterNoise                  Meter = "noise"
+	MeterPanicLevel             Meter = "panic_level"
+	MeterRadiationExposure      Meter = "radiation_exposure"
+	MeterScent                  Meter = "scent"
+	MeterSignalStrength         Meter = "signal_strength"
+	MeterStealthProfile         Meter = "stealth_profile"
+	MeterSupplyBuffer           Meter = "supply_buffer"
+	MeterSupplyOutlook          Meter = "supply_outlook"
+	MeterThirstStreak           Meter = "thirst_streak"
+	MeterTrust                  Meter = "trust"
+	MeterVisibility             Meter = "visibility"
+	MeterWarmStreak             Meter = "warm_streak"
 )
 
-var AllMeters = []Meter{MeterCampVisibility, MeterColdExposure, MeterCustomLastTurn, MeterExhaustionScenes, MeterFeverMedication, MeterFeverRest, MeterHydrationRecovery, MeterInfectionPressure, MeterLeadershipTrust, MeterNoise, MeterPanicLevel, MeterScent, MeterSignalStrength, MeterStealthProfile, MeterSupplyOutlook, MeterThirstStreak, MeterTrust, MeterVisibility, MeterWarmStreak}
+var AllMeters = []Meter{MeterCampVisibility, MeterColdExposure, MeterCommunitySentiment, MeterCustomLastTurn, MeterExhaustionScenes, MeterFeverMedication, MeterFeverRest, MeterFortificationIntegrity, MeterHydrationRecovery, MeterInfectionPressure, MeterLeadershipTrust, MeterNoise, MeterPanicLevel, MeterRadiationExposure, MeterScent, MeterSignalStrength, MeterStealthProfile, MeterSupplyBuffer, MeterSupplyOutlook, MeterThirstStreak, MeterTrust, MeterVisibility, MeterWarmStreak}
 
 type LocationType string
 
 const (
-	LocationTypeCanyon        LocationType = "canyon"
-	LocationTypeCity          LocationType = "city"
-	LocationTypeCoast         LocationType = "coast"
-	LocationTypeDesert        LocationType = "desert"
-	LocationTypeForest        LocationType = "forest"
-	LocationTypeIndustrial    LocationType = "industrial"
-	LocationTypeIsland        LocationType = "island"
-	LocationTypeMarsh         LocationType = "marsh"
-	LocationTypeMegastructure LocationType = "megastructure"
-	LocationTypeMountain      LocationType = "mountain"
-	LocationTypePlateau       LocationType = "plateau"
-	LocationTypeRural         LocationType = "rural"
-	LocationTypeSubterranean  LocationType = "subterranean"
-	LocationTypeSuburb        LocationType = "suburb"
-	LocationTypeTundra        LocationType = "tundra"
+	LocationTypeAirport         LocationType = "airport"
+	LocationTypeCanyon          LocationType = "canyon"
+	LocationTypeCity            LocationType = "city"
+	LocationTypeCoast           LocationType = "coast"
+	LocationTypeDesert          LocationType = "desert"
+	LocationTypeForest          LocationType = "forest"
+	LocationTypeHarbor          LocationType = "harbor"
+	LocationTypeIndustrial      LocationType = "industrial"
+	LocationTypeIsland          LocationType = "island"
+	LocationTypeMarsh           LocationType = "marsh"
+	LocationTypeMegastructure   LocationType = "megastructure"
+	LocationTypeMountain        LocationType = "mountain"
+	LocationTypePlateau         LocationType = "plateau"
+	LocationTypeResearchOutpost LocationType = "research_outpost"
+	LocationTypeRural           LocationType = "rural"
+	LocationTypeStronghold      LocationType = "stronghold"
+	LocationTypeSubterranean    LocationType = "subterranean"
+	LocationTypeSuburb          LocationType = "suburb"
+	LocationTypeTundra          LocationType = "tundra"
 )
 
-var AllLocationTypes = []LocationType{LocationTypeCanyon, LocationTypeCity, LocationTypeCoast, LocationTypeDesert, LocationTypeForest, LocationTypeIndustrial, LocationTypeIsland, LocationTypeMarsh, LocationTypeMegastructure, LocationTypeMountain, LocationTypePlateau, LocationTypeRural, LocationTypeSubterranean, LocationTypeSuburb, LocationTypeTundra}
+var AllLocationTypes = []LocationType{LocationTypeAirport, LocationTypeCanyon, LocationTypeCity, LocationTypeCoast, LocationTypeDesert, LocationTypeForest, LocationTypeHarbor, LocationTypeIndustrial, LocationTypeIsland, LocationTypeMarsh, LocationTypeMegastructure, LocationTypeMountain, LocationTypePlateau, LocationTypeResearchOutpost, LocationTypeRural, LocationTypeStronghold, LocationTypeSubterranean, LocationTypeSuburb, LocationTypeTundra}
 
 const (
-	LocationCanyon        = LocationTypeCanyon
-	LocationCity          = LocationTypeCity
-	LocationCoast         = LocationTypeCoast
-	LocationDesert        = LocationTypeDesert
-	LocationForest        = LocationTypeForest
-	LocationIndustrial    = LocationTypeIndustrial
-	LocationIsland        = LocationTypeIsland
-	LocationMarsh         = LocationTypeMarsh
-	LocationMegastructure = LocationTypeMegastructure
-	LocationMountain      = LocationTypeMountain
-	LocationPlateau       = LocationTypePlateau
-	LocationRural         = LocationTypeRural
-	LocationSubterranean  = LocationTypeSubterranean
-	LocationSuburb        = LocationTypeSuburb
-	LocationTundra        = LocationTypeTundra
+	LocationAirport         = LocationTypeAirport
+	LocationCanyon          = LocationTypeCanyon
+	LocationCity            = LocationTypeCity
+	LocationCoast           = LocationTypeCoast
+	LocationDesert          = LocationTypeDesert
+	LocationForest          = LocationTypeForest
+	LocationHarbor          = LocationTypeHarbor
+	LocationIndustrial      = LocationTypeIndustrial
+	LocationIsland          = LocationTypeIsland
+	LocationMarsh           = LocationTypeMarsh
+	LocationMegastructure   = LocationTypeMegastructure
+	LocationMountain        = LocationTypeMountain
+	LocationPlateau         = LocationTypePlateau
+	LocationResearchOutpost = LocationTypeResearchOutpost
+	LocationRural           = LocationTypeRural
+	LocationStronghold      = LocationTypeStronghold
+	LocationSubterranean    = LocationTypeSubterranean
+	LocationSuburb          = LocationTypeSuburb
+	LocationTundra          = LocationTypeTundra
 )
 
 type Season string
@@ -235,14 +270,17 @@ const (
 	GroupTypeDuo            GroupType = "Duo"
 	GroupTypeNomadClan      GroupType = "NomadClan"
 	GroupTypeReliefColumn   GroupType = "ReliefColumn"
+	GroupTypeRescueSquad    GroupType = "RescueSquad"
 	GroupTypeResearchTeam   GroupType = "ResearchTeam"
+	GroupTypeSanctuaryOrder GroupType = "SanctuaryOrder"
+	GroupTypeScoutWing      GroupType = "ScoutWing"
 	GroupTypeSmallGroup     GroupType = "SmallGroup"
 	GroupTypeSolo           GroupType = "Solo"
 	GroupTypeTaskForce      GroupType = "TaskForce"
 	GroupTypeTradingCaravan GroupType = "TradingCaravan"
 )
 
-var AllGroupTypes = []GroupType{GroupTypeCommunity, GroupTypeConvoy, GroupTypeDuo, GroupTypeNomadClan, GroupTypeReliefColumn, GroupTypeResearchTeam, GroupTypeSmallGroup, GroupTypeSolo, GroupTypeTaskForce, GroupTypeTradingCaravan}
+var AllGroupTypes = []GroupType{GroupTypeCommunity, GroupTypeConvoy, GroupTypeDuo, GroupTypeNomadClan, GroupTypeReliefColumn, GroupTypeRescueSquad, GroupTypeResearchTeam, GroupTypeSanctuaryOrder, GroupTypeScoutWing, GroupTypeSmallGroup, GroupTypeSolo, GroupTypeTaskForce, GroupTypeTradingCaravan}
 
 const (
 	GroupCommunity      = GroupTypeCommunity
@@ -250,7 +288,10 @@ const (
 	GroupDuo            = GroupTypeDuo
 	GroupNomadClan      = GroupTypeNomadClan
 	GroupReliefColumn   = GroupTypeReliefColumn
+	GroupRescueSquad    = GroupTypeRescueSquad
 	GroupResearchTeam   = GroupTypeResearchTeam
+	GroupSanctuaryOrder = GroupTypeSanctuaryOrder
+	GroupScoutWing      = GroupTypeScoutWing
 	GroupSmallGroup     = GroupTypeSmallGroup
 	GroupSolo           = GroupTypeSolo
 	GroupTaskForce      = GroupTypeTaskForce

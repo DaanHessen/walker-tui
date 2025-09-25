@@ -15,6 +15,7 @@ import (
 	"github.com/DaanHessen/walker-tui/internal/text"
 	"github.com/DaanHessen/walker-tui/internal/ui"
 	"github.com/DaanHessen/walker-tui/internal/util"
+	"github.com/joho/godotenv"
 )
 
 var (
@@ -24,6 +25,9 @@ var (
 )
 
 func main() {
+	// Load .env file if it exists (ignore error if file doesn't exist)
+	_ = godotenv.Load()
+
 	seedFlag := flag.String("seed", "", "Run seed string (optional; random if omitted)")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL DSN")
 	density := flag.String("density", "standard", "Text density: concise|standard|rich")

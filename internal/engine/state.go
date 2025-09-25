@@ -117,17 +117,17 @@ func deriveInitialLAD(stream *Stream, loc LocationType) int {
 	distStream := stream.Child("distance")
 	var distance float64
 	switch loc {
-	case LocationCity:
+	case LocationCity, LocationHarbor, LocationAirport:
 		distance = 50 + distStream.Float64()*150 // 50-200
-	case LocationSuburb:
+	case LocationSuburb, LocationIndustrial, LocationMegastructure, LocationStronghold:
 		distance = 150 + distStream.Float64()*600 // 150-750
-	case LocationRural:
+	case LocationRural, LocationResearchOutpost, LocationCanyon, LocationForest, LocationCoast, LocationMountain, LocationDesert, LocationIsland, LocationMarsh, LocationPlateau, LocationTundra, LocationSubterranean:
 		distance = 400 + distStream.Float64()*2600 // 400-3000
 	default:
 		distance = 500 + distStream.Float64()*2000
 	}
-	hub := loc == LocationCity
-	ruralFlag := loc == LocationRural
+	hub := loc == LocationCity || loc == LocationHarbor || loc == LocationAirport
+	ruralFlag := loc == LocationRural || loc == LocationResearchOutpost || loc == LocationStronghold || loc == LocationCanyon
 	closures := distStream.Child("closures").Float64() < 0.15
 	evac := distStream.Child("evac").Float64() < 0.20
 	return ComputeLAD(distance, hub, ruralFlag, closures, evac, stream.Child("lad"))
@@ -170,7 +170,7 @@ var professionTemplates = []professionTemplate{
 			inv.Medical = append(inv.Medical, "antiseptic")
 			inv.Tools = append(inv.Tools, "stethoscope")
 		},
-		SkillBoosts: map[Skill]int{SkillMedicine: 3, SkillPsychology: 1, SkillEndurance: 1},
+		SkillBoosts: map[Skill]int{SkillMedicine: 3, SkillPharmacology: 2, SkillPsychology: 1, SkillEndurance: 1},
 	},
 	{
 		Name:         "mechanic",
@@ -183,7 +183,7 @@ var professionTemplates = []professionTemplate{
 			inv.Tools = append(inv.Tools, "socket set")
 			inv.Special = append(inv.Special, "spare fuses")
 		},
-		SkillBoosts: map[Skill]int{SkillTechnical: 3, SkillEngineering: 2, SkillCrafting: 1},
+		SkillBoosts: map[Skill]int{SkillMechanics: 4, SkillEngineering: 2, SkillTechnical: 2, SkillCrafting: 1},
 	},
 	{
 		Name:         "teacher",
@@ -193,7 +193,7 @@ var professionTemplates = []professionTemplate{
 		FatigueRange: [2]int{5, 15},
 		MoraleRange:  [2]int{60, 75},
 		InventoryFn:  func(inv *Inventory) { inv.Special = append(inv.Special, "lesson planner") },
-		SkillBoosts:  map[Skill]int{SkillLeadership: 1, SkillCommunications: 2, SkillPsychology: 1},
+		SkillBoosts:  map[Skill]int{SkillLeadership: 1, SkillCommunications: 2, SkillLinguistics: 2, SkillPsychology: 1},
 	},
 	{
 		Name:         "police_officer",
@@ -307,7 +307,7 @@ var professionTemplates = []professionTemplate{
 			inv.Tools = append(inv.Tools, "climbing kit")
 			inv.Special = append(inv.Special, "rope coils")
 		},
-		SkillBoosts: map[Skill]int{SkillMountaineering: 4, SkillSurvival: 2, SkillEndurance: 1},
+		SkillBoosts: map[Skill]int{SkillMountaineering: 4, SkillSurvival: 2, SkillCartography: 1, SkillEndurance: 1},
 	},
 	{
 		Name:         "investigative_journalist",
@@ -320,7 +320,7 @@ var professionTemplates = []professionTemplate{
 			inv.Special = append(inv.Special, "voice recorder")
 			inv.Tools = append(inv.Tools, "camera")
 		},
-		SkillBoosts: map[Skill]int{SkillForensics: 2, SkillCommunications: 3, SkillStealth: 1},
+		SkillBoosts: map[Skill]int{SkillForensics: 2, SkillCommunications: 3, SkillDiplomacy: 1, SkillStealth: 1},
 	},
 	{
 		Name:         "quartermaster",
@@ -333,7 +333,59 @@ var professionTemplates = []professionTemplate{
 			inv.Tools = append(inv.Tools, "ledger")
 			inv.Special = append(inv.Special, "supply manifest")
 		},
-		SkillBoosts: map[Skill]int{SkillLogistics: 4, SkillLeadership: 2, SkillNegotiation: 1},
+		SkillBoosts: map[Skill]int{SkillLogistics: 4, SkillLeadership: 2, SkillStrategy: 1, SkillNegotiation: 1},
+	},
+	{
+		Name:         "botanist",
+		HealthRange:  [2]int{80, 95},
+		HungerRange:  [2]int{15, 30},
+		ThirstRange:  [2]int{15, 30},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "field kit")
+			inv.Special = append(inv.Special, "plant press")
+		},
+		SkillBoosts: map[Skill]int{SkillBotany: 4, SkillAgriculture: 2, SkillChemistry: 1},
+	},
+	{
+		Name:         "pilot",
+		HealthRange:  [2]int{90, 105},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{8, 18},
+		MoraleRange:  [2]int{60, 80},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "flight gloves")
+			inv.Special = append(inv.Special, "navigation charts")
+		},
+		SkillBoosts: map[Skill]int{SkillPiloting: 4, SkillNavigation: 2, SkillAeronautics: 2},
+	},
+	{
+		Name:         "chemist",
+		HealthRange:  [2]int{80, 95},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{55, 70},
+		InventoryFn: func(inv *Inventory) {
+			inv.Tools = append(inv.Tools, "sample vials")
+			inv.Special = append(inv.Special, "portable burner")
+		},
+		SkillBoosts: map[Skill]int{SkillChemistry: 4, SkillPharmacology: 2, SkillTechnical: 2},
+	},
+	{
+		Name:         "diplomat",
+		HealthRange:  [2]int{80, 95},
+		HungerRange:  [2]int{20, 35},
+		ThirstRange:  [2]int{20, 35},
+		FatigueRange: [2]int{5, 15},
+		MoraleRange:  [2]int{60, 80},
+		InventoryFn: func(inv *Inventory) {
+			inv.Special = append(inv.Special, "treaty folio")
+			inv.Tools = append(inv.Tools, "translator earpiece")
+		},
+		SkillBoosts: map[Skill]int{SkillDiplomacy: 4, SkillNegotiation: 2, SkillCommunications: 2},
 	},
 }
 
@@ -439,7 +491,7 @@ func NewFirstSurvivor(stream *Stream, originRegion string) Survivor {
 		Name:        fullName,
 		Age:         18 + stream.Child("age").Intn(38),
 		Background:  prof.Name,
-        Region:      regionLabel,
+		Region:      regionLabel,
 		Location:    loc,
 		Group:       GroupSolo,
 		GroupSize:   1,
@@ -478,7 +530,7 @@ func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survi
 		gSize = 3 + groupStream.Child("size").Intn(3)
 	}
 
-	locs := []LocationType{LocationCity, LocationSuburb, LocationRural, LocationForest, LocationCoast, LocationIndustrial, LocationMegastructure, LocationCanyon}
+	locs := []LocationType{LocationCity, LocationSuburb, LocationRural, LocationForest, LocationCoast, LocationIndustrial, LocationMegastructure, LocationCanyon, LocationHarbor, LocationAirport, LocationResearchOutpost, LocationStronghold}
 	loc := locs[stream.Child("location").Intn(len(locs))]
 	lad := deriveInitialLAD(stream.Child("lad"), loc)
 
@@ -517,7 +569,7 @@ func NewGenericSurvivor(stream *Stream, worldDay int, originRegion string) Survi
 		Name:       fullName,
 		Age:        16 + stream.Child("age").Intn(40),
 		Background: prof.Name,
-        Region:     regionLabel,
+		Region:     regionLabel,
 		Location:   loc,
 		Group:      g,
 		GroupSize:  gSize,
@@ -569,20 +621,24 @@ func baselineSkills() map[Skill]int {
 
 func baselineMeters() map[Meter]int {
 	return map[Meter]int{
-		MeterNoise:             0,
-		MeterVisibility:        0,
-		MeterScent:             0,
-		MeterThirstStreak:      0,
-		MeterHydrationRecovery: 0,
-		MeterColdExposure:      0,
-		MeterFeverRest:         0,
-		MeterFeverMedication:   0,
-		MeterWarmStreak:        0,
-		MeterExhaustionScenes:  0,
-		MeterCustomLastTurn:    -10,
-		MeterStealthProfile:    0,
-		MeterLeadershipTrust:   0,
-		MeterSupplyOutlook:     0,
+		MeterNoise:                  0,
+		MeterVisibility:             0,
+		MeterScent:                  0,
+		MeterThirstStreak:           0,
+		MeterHydrationRecovery:      0,
+		MeterColdExposure:           0,
+		MeterFeverRest:              0,
+		MeterFeverMedication:        0,
+		MeterWarmStreak:             0,
+		MeterExhaustionScenes:       0,
+		MeterCustomLastTurn:         -10,
+		MeterStealthProfile:         0,
+		MeterLeadershipTrust:        0,
+		MeterSupplyOutlook:          0,
+		MeterCommunitySentiment:     0,
+		MeterFortificationIntegrity: 0,
+		MeterRadiationExposure:      0,
+		MeterSupplyBuffer:           0,
 	}
 }
 

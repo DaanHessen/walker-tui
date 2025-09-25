@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,10 +28,17 @@ type Narrator interface {
 
 // DeepSeek wraps the DeepSeek Reasoner model for both narration and director planning.
 type DeepSeek struct {
-	apiKey string
-	client *http.Client
-	prompt string
+	apiKey   string
+	client   *http.Client
+	prompt   string
+	endpoint string
+	debug    bool
 }
+
+const (
+	defaultDeepSeekBase = "https://api.deepseek.com"
+	deepSeekPath        = "/v1/chat/completions"
+)
 
 func NewDeepSeek(apiKey string) (*DeepSeek, error) {
 	if strings.TrimSpace(apiKey) == "" {
@@ -39,7 +48,14 @@ func NewDeepSeek(apiKey string) (*DeepSeek, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DeepSeek{apiKey: apiKey, client: &http.Client{Timeout: 120 * time.Second}, prompt: prompt}, nil
+	base := strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL"))
+	if base == "" {
+		base = defaultDeepSeekBase
+	}
+	base = strings.TrimRight(base, "/")
+	endpoint := base + deepSeekPath
+	debug := strings.EqualFold(os.Getenv("ZEROPOINT_DEBUG_DEEPSEEK"), "1")
+	return &DeepSeek{apiKey: apiKey, client: &http.Client{Timeout: 120 * time.Second}, prompt: prompt, endpoint: endpoint, debug: debug}, nil
 }
 
 func (d *DeepSeek) Scene(ctx context.Context, st any) (string, error) {
@@ -66,6 +82,13 @@ func (d *DeepSeek) Scene(ctx context.Context, st any) (string, error) {
 		return "", errors.New("scene validation failed")
 	}
 	return cleaned, nil
+}
+
+func (d *DeepSeek) logf(format string, args ...any) {
+	if !d.debug {
+		return
+	}
+	log.Printf("[deepseek] "+format, args...)
 }
 
 func (d *DeepSeek) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
@@ -291,10 +314,18 @@ func getSystemPrompt() (string, error) {
 }
 
 func (d *DeepSeek) chat(ctx context.Context, messages []dsMessage, maxTokens int) (string, error) {
-	reqBody, err := json.Marshal(dsRequest{Model: "deepseek-reasoner", Messages: messages, MaxTokens: maxTokens})
+	req := dsRequest{
+		Model:     "deepseek-reasoner",
+		Messages:  messages,
+		MaxTokens: maxTokens,
+		Stream:    false,
+		Reasoning: &dsReasoning{Effort: "medium"},
+	}
+	reqBody, err := json.Marshal(req)
 	if err != nil {
 		return "", err
 	}
+	d.logf("POST %s model=%s tokens=%d messages=%d", d.endpoint, req.Model, maxTokens, len(messages))
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
@@ -306,6 +337,7 @@ func (d *DeepSeek) chat(ctx context.Context, messages []dsMessage, maxTokens int
 			backoff(attempt)
 			continue
 		}
+		d.logf("response len=%d", len(res))
 		return res, nil
 	}
 	if lastErr == nil {
@@ -322,45 +354,132 @@ type dsMessage struct {
 }
 
 type dsRequest struct {
-	Model     string      `json:"model"`
-	Messages  []dsMessage `json:"messages"`
-	MaxTokens int         `json:"max_tokens,omitempty"`
+	Model       string       `json:"model"`
+	Messages    []dsMessage  `json:"messages"`
+	MaxTokens   int          `json:"max_tokens,omitempty"`
+	Reasoning   *dsReasoning `json:"reasoning,omitempty"`
+	Stream      bool         `json:"stream,omitempty"`
+}
+
+type dsReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type dsChoice struct {
-	Message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"message"`
+	Message dsMessagePayload `json:"message"`
 }
 
 type dsResponse struct {
 	Choices []dsChoice `json:"choices"`
 }
 
+type dsMessagePayload struct {
+	Role    string    `json:"role"`
+	Content dsContent `json:"content"`
+}
+
+type dsContent struct {
+	Parts []dsContentPart
+}
+
+type dsContentPart struct {
+	Type string `json:"type,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+func (c *dsContent) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	switch data[0] {
+	case '[':
+		var parts []dsContentPart
+		if err := json.Unmarshal(data, &parts); err != nil {
+			return err
+		}
+		c.Parts = parts
+		return nil
+	case '{':
+		var part dsContentPart
+		if err := json.Unmarshal(data, &part); err != nil {
+			return err
+		}
+		c.Parts = []dsContentPart{part}
+		return nil
+	case '"':
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		c.Parts = []dsContentPart{{Type: "output", Text: text}}
+		return nil
+	default:
+		return fmt.Errorf("unsupported content payload")
+	}
+}
+
+func (mp dsMessagePayload) OutputText() string {
+	return mp.Content.OutputText()
+}
+
+func (c dsContent) OutputText() string {
+	if len(c.Parts) == 0 {
+		return ""
+	}
+	for _, part := range c.Parts {
+		if strings.EqualFold(part.Type, "output") {
+			return strings.TrimSpace(part.Text)
+		}
+	}
+	for _, part := range c.Parts {
+		if part.Type == "" || strings.EqualFold(part.Type, "text") {
+			if trimmed := strings.TrimSpace(part.Text); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	var combined []string
+	for _, part := range c.Parts {
+		if strings.TrimSpace(part.Text) != "" {
+			combined = append(combined, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.TrimSpace(strings.Join(combined, "\n"))
+}
+
 func (d *DeepSeek) doRequest(ctx context.Context, body []byte) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.deepseek.com/v1/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+d.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "walker-tui/0.1")
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	d.logf("status=%d payload=%s", resp.StatusCode, truncateForLog(string(payload), 320))
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("deepseek status %d", resp.StatusCode)
+		return "", fmt.Errorf("deepseek status %d: %s", resp.StatusCode, truncateForLog(string(payload), 200))
 	}
 	var dr dsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
-		return "", err
+	if err := json.Unmarshal(payload, &dr); err != nil {
+		return "", fmt.Errorf("decode deepseek response: %w", err)
 	}
 	if len(dr.Choices) == 0 {
 		return "", errors.New("no choices")
 	}
-	return dr.Choices[0].Message.Content, nil
+	output := strings.TrimSpace(dr.Choices[0].Message.OutputText())
+	if output == "" {
+		return "", errors.New("deepseek response empty")
+	}
+	return output, nil
 }
 
 var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -396,6 +515,16 @@ func validateNarrative(s string, isScene bool, st map[string]any) bool {
 		}
 	}
 	return true
+}
+
+func truncateForLog(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	if limit < 3 {
+		limit = 3
+	}
+	return s[:limit-3] + "..."
 }
 
 func wordCount(s string) int { return len(strings.Fields(s)) }
