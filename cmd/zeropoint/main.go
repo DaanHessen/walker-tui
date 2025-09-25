@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DaanHessen/walker-tui/internal/engine"
 	"github.com/DaanHessen/walker-tui/internal/store"
 	"github.com/DaanHessen/walker-tui/internal/text"
 	"github.com/DaanHessen/walker-tui/internal/ui"
@@ -28,9 +27,8 @@ func main() {
 	seedFlag := flag.String("seed", "", "Run seed string (optional; random if omitted)")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL DSN")
 	density := flag.String("density", "standard", "Text density: concise|standard|rich")
-	noAI := flag.Bool("no-ai", false, "Disable DeepSeek narration (force minimal fallback)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "walker-tui [--seed seedstring] [--dsn DSN] [--density=concise|standard|rich] [--no-ai] | migrate up|down | version\n")
+		fmt.Fprintf(os.Stderr, "walker-tui [--seed seedstring] [--dsn DSN] [--density=concise|standard|rich] | migrate up|down | version\n")
 	}
 	flag.Parse()
 
@@ -86,7 +84,6 @@ func main() {
 		SeedText:     seedText,
 		DSN:          *dsn,
 		TextDensity:  *density,
-		UseAI:        !*noAI && os.Getenv("DEEPSEEK_API_KEY") != "",
 		DebugLAD:     os.Getenv("ZEROPOINT_DEBUG_LAD") == "1",
 		RulesVersion: rulesVersion,
 	}
@@ -104,32 +101,17 @@ func main() {
 		log.Fatalf("migrations failed: %v", err)
 	}
 
-	// Verify event registry exists and is valid
-	if err := engine.VerifyEventsPack("assets/events"); err != nil {
-		log.Fatalf("event registry error: %v", err)
-	}
-
 	db, err := store.Open(ctx, cfg)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}
 	defer db.Close()
-
-	var narrator text.Narrator
-	fallback := text.NewMinimalFallbackNarrator()
-	if cfg.UseAI {
-		ds, err := text.NewDeepSeekNarrator(os.Getenv("DEEPSEEK_API_KEY"))
-		if err != nil {
-			log.Printf("DeepSeek disabled: %v", err)
-			narrator = fallback
-		} else {
-			narrator = text.WithFallback(ds, fallback)
-		}
-	} else {
-		narrator = fallback
+	ds, err := text.NewDeepSeek(os.Getenv("DEEPSEEK_API_KEY"))
+	if err != nil {
+		log.Printf("DeepSeek unavailable: %v", err)
 	}
 
-	if err := ui.Run(ctx, db, narrator, cfg, version); err != nil {
+	if err := ui.Run(ctx, db, ds, ds, cfg, version, err); err != nil {
 		log.Fatal(err)
 	}
 }

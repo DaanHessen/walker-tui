@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -31,9 +33,80 @@ const (
 	viewHelp        = "help"
 	viewWorldConfig = "world_config"
 	viewTimeline    = "timeline"
+	viewLoading     = "loading"
+	viewError       = "error"
 )
 
 var seedEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+
+const maxSeedLength = 64
+
+var spinnerFrames = []string{"|", "/", "-", "\\"}
+
+type newGameResultMsg struct {
+	result newGameResult
+	err    error
+}
+
+type spinnerTickMsg struct{}
+type tipTickMsg struct{}
+
+type newGameResult struct {
+	RunID          uuid.UUID
+	SurvivorID     uuid.UUID
+	SceneID        uuid.UUID
+	RunSeed        engine.RunSeed
+	PreRunSeed     engine.RunSeed
+	PreRunSeedText string
+	World          *engine.World
+	Survivor       engine.Survivor
+	Choices        []engine.Choice
+	CurrentEvent   *engine.EventContext
+	SceneRendered  string
+	Settings       store.Settings
+	Turn           int
+	Deaths         int
+	ScenesToday    int
+	Timeline       string
+}
+
+type newGameInput struct {
+	SeedText     string
+	Scarcity     bool
+	Density      string
+	Theme        string
+	RulesVersion string
+	DebugLAD     bool
+}
+
+func defaultTips() []string {
+	return []string{
+		"Rotate survivors between exertion and rest to avoid exhaustion penalties.",
+		"Scout unknown streets before committing to loud work like barricading.",
+		"Use quiet hours ahead of LAD to stash extra water and map safe routes.",
+		"Morale drops can spiral; mix in organizing or reflective actions to recover.",
+		"Custom actions obey fatigue rules—watch meters before attempting risky moves.",
+	}
+}
+
+type styleSet struct {
+	title          lipgloss.Style
+	topBar         lipgloss.Style
+	bottomBar      lipgloss.Style
+	menuBox        lipgloss.Style
+	menuItem       lipgloss.Style
+	menuItemActive lipgloss.Style
+	scene          lipgloss.Style
+	sidebar        lipgloss.Style
+	accent         lipgloss.Style
+	muted          lipgloss.Style
+	borderColor    lipgloss.Color
+	barFillColor   lipgloss.Color
+	barEmptyColor  lipgloss.Color
+	riskLow        lipgloss.Style
+	riskModerate   lipgloss.Style
+	riskHigh       lipgloss.Style
+}
 
 type model struct {
 	ctx          context.Context
@@ -42,28 +115,40 @@ type model struct {
 	runSeed      engine.RunSeed
 	rulesVersion string
 	narrator     text.Narrator
+	planner      engine.DirectorPlanner
+	themeName    string
+	palette      palette
+	styles       styleSet
 	md           string
 	// sceneRendered: current scene markdown (no appended choices)
 	sceneRendered string
 	sceneText     string
 	// accumulated timeline (previous scenes+outcomes)
 	timeline     string
-	styles       struct{ title lipgloss.Style }
 	choices      []engine.Choice
 	currentEvent *engine.EventContext
 	// persistence
-	db           *store.DB
-	runID        uuid.UUID
-	survivorID   uuid.UUID
-	sceneID      uuid.UUID
-	turn         int
-	deaths       int
-	view         string
-	logs         []store.MasterLog
-	archives     []store.ArchiveCard
-	settings     store.Settings
-	exportStatus string
-	debugLAD     bool
+	db             *store.DB
+	runID          uuid.UUID
+	survivorID     uuid.UUID
+	sceneID        uuid.UUID
+	turn           int
+	deaths         int
+	view           string
+	logs           []store.MasterLog
+	archives       []store.ArchiveCard
+	settings       store.Settings
+	exportStatus   string
+	debugLAD       bool
+	tips           []string
+	tipIndex       int
+	nextTip        time.Time
+	loading        bool
+	loadingMessage string
+	loadingTip     string
+	spinnerFrame   int
+	startupErr     error
+	errorMessage   string
 	// custom action
 	customInput   string
 	customEnabled bool
@@ -72,21 +157,24 @@ type model struct {
 	height        int
 
 	// pre-run configuration
-	preRunScarcity bool
-	preRunDensity  string
-	preRunSeed     engine.RunSeed
-	preRunSeedText string
+	preRunScarcity    bool
+	preRunDensity     string
+	preRunSeed        engine.RunSeed
+	preRunSeedText    string
+	preRunSeedBuffer  string
+	preRunSeedEditing bool
+	preRunTheme       string
 
 	// archive browser
 	archiveIndex  int
 	archiveDetail bool
 
-	// scrolling support
-	scrollOffset int
-	maxScroll    int
-
 	// multi-day loop
 	scenesToday int
+
+	// scene scrolling support
+	scrollOffset int
+	maxScroll    int
 
 	// timeline scrolling
 	timelineScroll int
@@ -108,13 +196,182 @@ func (m *model) survivorStream(index int) *engine.Stream {
 	return m.runSeed.Stream(fmt.Sprintf("survivor#%d", index))
 }
 
+func (m *model) applyTheme(name string) {
+	p := paletteFor(name)
+	m.themeName = name
+	m.palette = p
+	m.styles = styleSet{
+		title:          lipgloss.NewStyle().Bold(true).Foreground(p.Accent),
+		topBar:         lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).Bold(true).Padding(0, 1),
+		bottomBar:      lipgloss.NewStyle().Background(p.Surface).Foreground(p.Muted).Padding(0, 1),
+		menuBox:        lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(p.Border).Background(p.Surface).Foreground(p.Text).Padding(1, 2),
+		menuItem:       lipgloss.NewStyle().Foreground(p.Text),
+		menuItemActive: lipgloss.NewStyle().Foreground(p.Accent).Bold(true),
+		scene:          lipgloss.NewStyle().Foreground(p.Text),
+		sidebar:        lipgloss.NewStyle().Foreground(p.Text),
+		accent:         lipgloss.NewStyle().Foreground(p.Accent),
+		muted:          lipgloss.NewStyle().Foreground(p.Muted),
+		borderColor:    p.Border,
+		barFillColor:   p.BarFill,
+		barEmptyColor:  p.BarEmpty,
+		riskLow:        lipgloss.NewStyle().Foreground(p.Success).Bold(true),
+		riskModerate:   lipgloss.NewStyle().Foreground(p.Warning).Bold(true),
+		riskHigh:       lipgloss.NewStyle().Foreground(p.AccentAlt).Bold(true),
+	}
+}
+
+func (m *model) newGameCommand(input newGameInput) tea.Cmd {
+	ctx := m.ctx
+	db := m.db
+	narrator := m.narrator
+	planner := m.planner
+	return func() tea.Msg {
+		res, err := runNewGame(ctx, db, narrator, planner, input)
+		return newGameResultMsg{result: res, err: err}
+	}
+}
+
+func (m *model) spinnerTickCmd() tea.Cmd {
+	if !m.loading {
+		return nil
+	}
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+}
+
+func (m *model) tipTickCmd() tea.Cmd {
+	if !m.loading || len(m.tips) == 0 {
+		return nil
+	}
+	d := time.Until(m.nextTip)
+	if d <= 0 {
+		d = 5 * time.Second
+	}
+	return tea.Tick(d, func(time.Time) tea.Msg { return tipTickMsg{} })
+}
+
+func runNewGame(ctx context.Context, db *store.DB, narrator text.Narrator, planner engine.DirectorPlanner, input newGameInput) (newGameResult, error) {
+	result := newGameResult{}
+	if planner == nil || narrator == nil {
+		return result, errors.New("deepseek client unavailable")
+	}
+	seed, err := engine.NewRunSeed(strings.TrimSpace(input.SeedText))
+	if err != nil {
+		return result, err
+	}
+	temp := &model{
+		ctx:              ctx,
+		db:               db,
+		narrator:         narrator,
+		planner:          planner,
+		rulesVersion:     input.RulesVersion,
+		debugLAD:         input.DebugLAD,
+		preRunScarcity:   input.Scarcity,
+		preRunDensity:    input.Density,
+		preRunSeed:       seed,
+		preRunSeedText:   strings.TrimSpace(input.SeedText),
+		preRunSeedBuffer: strings.TrimSpace(input.SeedText),
+		preRunTheme:      input.Theme,
+		runSeed:          seed,
+	}
+	temp.applyTheme(input.Theme)
+	temp.world = engine.NewWorld(seed, input.RulesVersion)
+	temp.survivor = engine.NewFirstSurvivor(seed.Stream("survivor#0"), temp.world.OriginSite)
+	temp.world.CurrentDay = temp.survivor.Environment.WorldDay
+	temp.turn = 0
+	temp.deaths = 0
+	temp.scenesToday = 0
+	temp.timeline = ""
+	if err := temp.bootstrapPersistence(); err != nil {
+		return result, err
+	}
+	result = newGameResult{
+		RunID:          temp.runID,
+		SurvivorID:     temp.survivorID,
+		SceneID:        temp.sceneID,
+		RunSeed:        temp.runSeed,
+		PreRunSeed:     temp.preRunSeed,
+		PreRunSeedText: temp.preRunSeedText,
+		World:          temp.world,
+		Survivor:       temp.survivor,
+		Choices:        append([]engine.Choice(nil), temp.choices...),
+		CurrentEvent:   temp.currentEvent,
+		SceneRendered:  temp.sceneRendered,
+		Settings:       temp.settings,
+		Turn:           temp.turn,
+		Deaths:         temp.deaths,
+		ScenesToday:    temp.scenesToday,
+		Timeline:       temp.timeline,
+	}
+	return result, nil
+}
+
 func (m *model) loadEventHistory(tx *gorm.DB) (engine.EventHistory, error) {
 	repo := store.NewEventRepo(m.db)
 	return repo.LoadHistory(m.ctx, tx, m.runID)
 }
 
+func (m *model) handleWorldConfigKey(msg tea.KeyMsg) bool {
+	k := msg.String()
+	if m.preRunSeedEditing {
+		switch msg.Type {
+		case tea.KeyEnter:
+			m.preRunSeedEditing = false
+			m.preRunSeedText = strings.TrimSpace(m.preRunSeedBuffer)
+			return true
+		case tea.KeyEsc:
+			m.preRunSeedEditing = false
+			m.preRunSeedText = strings.TrimSpace(m.preRunSeedBuffer)
+			return true
+		case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+			if len(m.preRunSeedBuffer) > 0 {
+				m.preRunSeedBuffer = m.preRunSeedBuffer[:len(m.preRunSeedBuffer)-1]
+				m.preRunSeedText = m.preRunSeedBuffer
+			}
+			return true
+		case tea.KeyRunes:
+			for _, r := range msg.Runes {
+				if len(m.preRunSeedBuffer) >= maxSeedLength {
+					break
+				}
+				if r >= 32 && r < 127 {
+					m.preRunSeedBuffer += string(r)
+				}
+			}
+			m.preRunSeedText = strings.TrimSpace(m.preRunSeedBuffer)
+			return true
+		}
+		return true
+	}
+
+	switch k {
+	case "enter":
+		m.preRunSeedEditing = true
+		return true
+	case "1":
+		m.preRunScarcity = !m.preRunScarcity
+		return true
+	case "2":
+		m.preRunDensity = cycleDensityLocal(m.preRunDensity)
+		return true
+	case "3":
+		next := nextThemeName(m.themeName, 1)
+		m.preRunTheme = next
+		m.applyTheme(next)
+		return true
+	case "4":
+		seed := randomSeedText()
+		m.preRunSeedText = seed
+		m.preRunSeedBuffer = seed
+		return true
+	case "5", "esc":
+		m.view = viewMainMenu
+		return true
+	}
+	return false
+}
+
 // initialModel boots to main menu; game state seeded but not persisted until New Game selected.
-func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg util.Config) model {
+func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, planner engine.DirectorPlanner, cfg util.Config, startupErr error) model {
 	runSeed, err := engine.NewRunSeed(cfg.SeedText)
 	if err != nil {
 		runSeed, _ = engine.NewRunSeed("fallback-seed")
@@ -129,10 +386,11 @@ func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg
 		runSeed:      runSeed,
 		rulesVersion: cfg.RulesVersion,
 		narrator:     narrator,
+		planner:      planner,
 		db:           db,
 		debugLAD:     cfg.DebugLAD,
 	}
-	m.styles.title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	m.applyTheme("catppuccin")
 	m.view = viewMainMenu
 	m.preRunScarcity = false
 	m.preRunDensity = cfg.TextDensity
@@ -141,6 +399,25 @@ func initialModel(ctx context.Context, db *store.DB, narrator text.Narrator, cfg
 	}
 	m.preRunSeed = runSeed
 	m.preRunSeedText = runSeed.Text
+	m.preRunSeedBuffer = runSeed.Text
+	m.preRunTheme = m.themeName
+	tipRepo := store.NewTipRepo(db)
+	if tipRecords, err := tipRepo.All(ctx); err == nil && len(tipRecords) > 0 {
+		for _, tip := range tipRecords {
+			m.tips = append(m.tips, tip.Text)
+		}
+	} else {
+		m.tips = defaultTips()
+	}
+	if len(m.tips) > 0 {
+		m.loadingTip = m.tips[0]
+	}
+	m.tipIndex = 0
+	m.startupErr = startupErr
+	if startupErr != nil {
+		m.errorMessage = startupErr.Error()
+		m.view = viewError
+	}
 	return m
 }
 
@@ -168,36 +445,64 @@ func (m *model) bootstrapPersistence() error {
 		return err
 	}
 	setRepo := store.NewSettingsRepo(m.db)
-	_ = setRepo.UpsertLegacy(m.ctx, m.runID, m.preRunScarcity, m.preRunDensity, "en", "auto")
+	_ = setRepo.Upsert(m.ctx, m.runID, m.preRunScarcity, m.preRunDensity, "en", "auto", "standard", m.preRunTheme)
 	m.refreshSettings()
 	return nil
 }
 
 // startNewGame persists and enters scene view.
-func (m *model) startNewGame() {
-	seed, err := engine.NewRunSeed(strings.TrimSpace(m.preRunSeedText))
-	if err != nil {
+func (m *model) startNewGame() tea.Cmd {
+	if m.planner == nil || m.narrator == nil {
+		m.view = viewError
+		if m.errorMessage == "" {
+			m.errorMessage = "DeepSeek API unavailable. Configure DEEPSEEK_API_KEY before starting a new game."
+		}
+		return nil
+	}
+	input := strings.TrimSpace(m.preRunSeedBuffer)
+	if input == "" {
+		m.md = "Seed cannot be empty"
+		return nil
+	}
+	if _, err := engine.NewRunSeed(input); err != nil {
 		m.md = "Invalid seed string"
-		return
+		return nil
 	}
-	m.preRunSeed = seed
-	m.runSeed = seed
-	m.world = engine.NewWorld(seed, m.rulesVersion)
-	m.survivor = engine.NewFirstSurvivor(seed.Stream("survivor#0"), m.world.OriginSite)
-	m.world.CurrentDay = m.survivor.Environment.WorldDay
-	m.turn = 0
-	m.deaths = 0
-	m.scenesToday = 0
-	m.timeline = ""
-	if err := m.bootstrapPersistence(); err != nil {
-		m.md = "Failed to start new game: " + err.Error()
-	} else {
-		m.view = viewScene
+	m.preRunSeedText = input
+	m.preRunSeedBuffer = input
+	m.loading = true
+	m.loadingMessage = "Preparing new survivor..."
+	m.spinnerFrame = 0
+	m.view = viewLoading
+	if len(m.tips) == 0 {
+		m.tips = defaultTips()
 	}
+	if len(m.tips) > 0 {
+		m.tipIndex = (m.tipIndex + 1) % len(m.tips)
+		m.loadingTip = m.tips[m.tipIndex]
+		m.nextTip = time.Now().Add(5 * time.Second)
+	}
+	inputCfg := newGameInput{
+		SeedText:     input,
+		Scarcity:     m.preRunScarcity,
+		Density:      m.preRunDensity,
+		Theme:        m.preRunTheme,
+		RulesVersion: m.rulesVersion,
+		DebugLAD:     m.debugLAD,
+	}
+	return tea.Batch(m.newGameCommand(inputCfg), m.spinnerTickCmd(), m.tipTickCmd())
 }
 
 // continueGame loads latest run & alive survivor, then generates a fresh scene (simplified resume).
 func (m *model) continueGame() {
+	m.loading = false
+	if m.planner == nil || m.narrator == nil {
+		m.view = viewError
+		if m.errorMessage == "" {
+			m.errorMessage = "DeepSeek API unavailable. Configure DEEPSEEK_API_KEY before continuing a run."
+		}
+		return
+	}
 	rr := store.NewRunRepo(m.db)
 	run, err := rr.GetLatestRun(m.ctx)
 	if err != nil {
@@ -215,6 +520,7 @@ func (m *model) continueGame() {
 	m.preRunSeed = runSeed
 	m.runSeed = runSeed
 	m.rulesVersion = run.RulesVersion
+	m.preRunSeedBuffer = run.SeedText
 	m.world = &engine.World{
 		OriginSite:   run.OriginSite,
 		Seed:         runSeed,
@@ -234,6 +540,10 @@ func (m *model) continueGame() {
 	m.deaths = 0
 	m.scenesToday = 0
 	m.refreshSettings()
+	m.preRunTheme = m.settings.Theme
+	if m.preRunTheme != "" {
+		m.applyTheme(m.preRunTheme)
+	}
 	if err := m.newSceneTx(); err != nil {
 		m.md = "Failed to build scene: " + err.Error()
 		return
@@ -248,7 +558,7 @@ func (m *model) newSceneTx() error {
 		if err != nil {
 			return err
 		}
-		choices, eventCtx, err := engine.GenerateChoices(m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+		choices, eventCtx, err := engine.GenerateChoices(m.ctx, m.planner, m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
 		if err != nil {
 			return err
 		}
@@ -270,8 +580,7 @@ func (m *model) newSceneTx() error {
 		if md == "" {
 			generated, err := m.narrator.Scene(m.ctx, state)
 			if err != nil {
-				fallback := text.NewMinimalFallbackNarrator()
-				generated, _ = fallback.Scene(m.ctx, state)
+				return err
 			}
 			md = generated
 			if sceneHash != nil {
@@ -306,6 +615,12 @@ func (m model) View() string {
 	if m.view == viewWorldConfig {
 		return m.renderWorldConfig()
 	}
+	if m.view == viewLoading {
+		return m.renderLoading()
+	}
+	if m.view == viewError {
+		return m.renderErrorScreen()
+	}
 	if m.view == viewScene {
 		return m.renderSceneLayout()
 	}
@@ -336,6 +651,56 @@ func (m model) View() string {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case newGameResultMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.loadingMessage = ""
+			m.loadingTip = ""
+			m.md = "Failed to start new game: " + msg.err.Error()
+			m.view = viewMainMenu
+			return m, nil
+		}
+		res := msg.result
+		m.runID = res.RunID
+		m.survivorID = res.SurvivorID
+		m.sceneID = res.SceneID
+		m.runSeed = res.RunSeed
+		m.preRunSeed = res.PreRunSeed
+		m.preRunSeedText = res.PreRunSeedText
+		m.preRunSeedBuffer = res.PreRunSeedText
+		m.world = res.World
+		m.survivor = res.Survivor
+		m.choices = res.Choices
+		m.currentEvent = res.CurrentEvent
+		m.sceneRendered = res.SceneRendered
+		m.settings = res.Settings
+		m.applyTheme(res.Settings.Theme)
+		m.preRunTheme = res.Settings.Theme
+		m.preRunScarcity = res.Settings.Scarcity
+		m.preRunDensity = res.Settings.TextDensity
+		m.turn = res.Turn
+		m.deaths = res.Deaths
+		m.scenesToday = res.ScenesToday
+		m.timeline = res.Timeline
+		m.view = viewScene
+		m.loadingMessage = ""
+		m.loadingTip = ""
+		m.md = m.renderSceneLayout()
+		return m, nil
+	case spinnerTickMsg:
+		if m.loading {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+			return m, m.spinnerTickCmd()
+		}
+		return m, nil
+	case tipTickMsg:
+		if m.loading && len(m.tips) > 0 {
+			m.tipIndex = (m.tipIndex + 1) % len(m.tips)
+			m.loadingTip = m.tips[m.tipIndex]
+			m.nextTip = time.Now().Add(5 * time.Second)
+			return m, m.tipTickCmd()
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -376,7 +741,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.view == viewMainMenu {
 			switch k {
 			case "1":
-				m.startNewGame()
+				if cmd := m.startNewGame(); cmd != nil {
+					return m, cmd
+				}
 			case "2":
 				m.continueGame()
 			case "3":
@@ -387,19 +754,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.view == viewWorldConfig {
-			switch k {
-			case "1":
-				m.preRunScarcity = !m.preRunScarcity
-			case "2":
-				m.preRunDensity = cycleDensityLocal(m.preRunDensity)
-			case "3":
-				text := randomSeedText()
-				m.preRunSeedText = text
-				if seed, err := engine.NewRunSeed(text); err == nil {
-					m.preRunSeed = seed
+			if m.handleWorldConfigKey(msg) {
+				if !m.preRunSeedEditing {
+					m.preRunSeedText = strings.TrimSpace(m.preRunSeedBuffer)
 				}
-			case "4", "esc":
-				m.view = viewMainMenu
+				m.md = m.renderWorldConfig()
 			}
 			return m, nil
 		}
@@ -426,33 +785,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.view == viewSettings {
 			switch k {
-			case "n":
-				m.toggleNarrator()
 			case "g":
 				m.cycleLanguage()
+			case "c":
+				m.cycleTheme()
 			}
 			return m, nil
 		}
-        switch k {
-        case "tab":
-            m.cyclePrimaryViews()
-        case "l":
-            m.view = viewLog
-            m.refreshLogs()
+		switch k {
+		case "tab":
+			m.cyclePrimaryViews()
+		case "l":
+			m.view = viewLog
+			m.refreshLogs()
 		case "a":
 			m.view = viewArchive
 			m.refreshArchives()
 		case "s":
 			m.view = viewSettings
 			m.refreshSettings()
-        case "m":
-            m.view = viewMainMenu
-        case "?":
-            if m.view == viewHelp {
-                m.view = viewScene
-            } else {
-                m.view = viewHelp
-            }
+		case "m":
+			m.view = viewMainMenu
+		case "?":
+			if m.view == viewHelp {
+				m.view = viewScene
+			} else {
+				m.view = viewHelp
+			}
 		case "t":
 			if m.view == viewSettings {
 				m.toggleScarcity()
@@ -493,15 +852,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.view == viewScene {
 			switch k {
 			case "pgdown", "ctrl+f":
-				m.scrollOffset += 8
+				m.scrollOffset += 6
 			case "pgup", "ctrl+b":
-				m.scrollOffset -= 8
+				m.scrollOffset -= 6
 			case "home":
 				m.scrollOffset = 0
 			case "end":
 				m.scrollOffset = m.maxScroll
+			default:
+				goto doneSceneScroll
 			}
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+			if m.scrollOffset > m.maxScroll {
+				m.scrollOffset = m.maxScroll
+			}
+			m.md = m.renderSceneLayout()
+			return m, nil
 		}
+	doneSceneScroll:
 	}
 	return m, nil
 }
@@ -521,28 +891,262 @@ func (m *model) renderSceneLayout() string {
 
 	// Build components
 	top := m.renderTopBar()
-	mainRaw := m.buildMainScene()
-	lines := strings.Split(mainRaw, "\n")
-	if m.scrollOffset < 0 {
-		m.scrollOffset = 0
+	scenePanel := lipgloss.JoinVertical(lipgloss.Left,
+		m.renderCharacterSummary(mainWidth-2),
+		"",
+		m.renderSceneNarrative(mainWidth-2),
+		"",
+		m.renderChoicesSection(mainWidth-2),
+	)
+	sceneLines := strings.Split(scenePanel, "\n")
+	availHeight := m.height - 4
+	if availHeight < 5 {
+		availHeight = len(sceneLines)
 	}
-	if m.scrollOffset > len(lines) {
-		m.scrollOffset = len(lines)
-	}
-	viewLines := lines
-	availHeight := m.height - 4 // approximate (top+bottom)
-	if availHeight > 5 && len(lines) > availHeight {
-		if m.scrollOffset+availHeight > len(lines) {
-			m.scrollOffset = len(lines) - availHeight
+	if availHeight > 0 && len(sceneLines) > availHeight {
+		m.maxScroll = len(sceneLines) - availHeight
+		if m.scrollOffset < 0 {
+			m.scrollOffset = 0
 		}
-		viewLines = lines[m.scrollOffset : m.scrollOffset+availHeight]
-		m.maxScroll = len(lines) - availHeight
+		if m.scrollOffset > m.maxScroll {
+			m.scrollOffset = m.maxScroll
+		}
+		sceneLines = sceneLines[m.scrollOffset : m.scrollOffset+availHeight]
+	} else {
+		m.scrollOffset = 0
+		m.maxScroll = 0
 	}
-	main := lipgloss.NewStyle().Width(mainWidth).Render(strings.Join(viewLines, "\n"))
-	side := lipgloss.NewStyle().Width(sidebarWidth).Border(lipgloss.NormalBorder()).Padding(0, 1).Render(m.buildSidebar())
+	scenePanel = strings.Join(sceneLines, "\n")
+	main := m.styles.scene.Copy().Width(mainWidth).Render(scenePanel)
+	sideSections := []string{
+		m.renderStatsSection(sidebarWidth - 2),
+		m.renderSkillsSection(sidebarWidth - 2),
+		m.renderConditionsSection(sidebarWidth - 2),
+		m.renderInventorySection(sidebarWidth - 2),
+	}
+	if meters := m.renderMetersSection(sidebarWidth - 2); meters != "" {
+		sideSections = append(sideSections, meters)
+	}
+	side := m.styles.sidebar.Copy().Width(sidebarWidth).Render(strings.Join(sideSections, "\n\n"))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, main, side)
 	bottom := m.renderBottomBar()
 	return lipgloss.JoinVertical(lipgloss.Left, top, body, bottom)
+}
+
+func (m *model) renderLoading() string {
+	width := m.width
+	if width < 50 {
+		width = 50
+	}
+	height := m.height
+	if height < 10 {
+		height = 10
+	}
+	spinner := ""
+	if len(spinnerFrames) > 0 {
+		spinner = spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+	}
+	message := m.loadingMessage
+	if message == "" {
+		message = "Loading..."
+	}
+	tip := m.loadingTip
+	if tip == "" && len(m.tips) > 0 {
+		tip = m.tips[m.tipIndex%len(m.tips)]
+	}
+	inner := fmt.Sprintf("%s %s\n\nTip: %s", m.styles.accent.Render(spinner), message, tip)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
+		m.styles.menuBox.Width(width/2).Render(inner))
+}
+
+func (m *model) renderErrorScreen() string {
+	width := m.width
+	if width < 60 {
+		width = 60
+	}
+	height := m.height
+	if height < 12 {
+		height = 12
+	}
+	msg := "DeepSeek API unavailable. Set DEEPSEEK_API_KEY in your environment to enable narration and events."
+	if m.errorMessage != "" {
+		msg = msg + "\n\n" + m.errorMessage
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		m.styles.title.Render("DeepSeek Required"),
+		m.styles.muted.Render(msg),
+	)
+	box := m.styles.menuBox.Width(56).Render(body)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m *model) sectionBox(title, body string, width int) string {
+	header := m.styles.title.Render(title)
+	content := lipgloss.JoinVertical(lipgloss.Left, header, body)
+	return lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).BorderForeground(m.styles.borderColor).Padding(0, 1).Width(width).Render(content)
+}
+
+func (m *model) renderCharacterSummary(width int) string {
+	s := m.survivor
+	env := s.Environment
+	lines := []string{
+		fmt.Sprintf("%s (%s, %d)", s.Name, strings.Title(s.Background), s.Age),
+		fmt.Sprintf("Region: %s • Location: %s", s.Region, strings.Title(string(s.Location))),
+		fmt.Sprintf("Group: %s (%d)", strings.Title(string(s.Group)), s.GroupSize),
+		fmt.Sprintf("Day %d • LAD %d • %s", env.WorldDay, env.LAD, strings.Title(env.TimeOfDay)),
+		fmt.Sprintf("Weather: %s • Season: %s", strings.Title(string(env.Weather)), strings.Title(string(env.Season))),
+	}
+	return m.sectionBox("Character", strings.Join(lines, "\n"), width)
+}
+
+func (m *model) renderSceneNarrative(width int) string {
+	body := strings.TrimSpace(m.sceneRendered)
+	return m.sectionBox("Scene", body, width)
+}
+
+func (m *model) renderChoicesSection(width int) string {
+	if len(m.choices) == 0 {
+		return m.sectionBox("Choices", "No actions available", width)
+	}
+	var b strings.Builder
+	for i, choice := range m.choices {
+		idx := i + 1
+		arch := choice.Archetype
+		if arch == "" {
+			arch = "action"
+		}
+		line1 := fmt.Sprintf("%d. %s — %s", idx, strings.Title(arch), choice.Label)
+		wrapped := lipgloss.NewStyle().Width(width - 2).Render(line1)
+		riskStyle := m.riskStyle(choice.Risk)
+		riskLine := fmt.Sprintf("Risk: %s", riskStyle.Render(strings.ToUpper(string(choice.Risk))))
+		costLine := fmt.Sprintf("Cost: %s", formatCost(choice.Cost))
+		line2 := fmt.Sprintf("   %s   %s", costLine, riskLine)
+		b.WriteString(wrapped + "\n")
+		b.WriteString(m.styles.muted.Render(line2))
+		if i < len(m.choices)-1 {
+			b.WriteString("\n\n")
+		}
+	}
+	if m.customStatus != "" {
+		b.WriteString("\n\n" + m.styles.muted.Render("Custom: "+m.customStatus))
+	}
+	return m.sectionBox("Choices", b.String(), width)
+}
+
+func (m *model) renderStatsSection(width int) string {
+	s := m.survivor.Stats
+	lines := []string{
+		fmt.Sprintf("Health  %s %3d", m.renderBar(s.Health), s.Health),
+		fmt.Sprintf("Hunger  %s %3d", m.renderBar(s.Hunger), s.Hunger),
+		fmt.Sprintf("Thirst  %s %3d", m.renderBar(s.Thirst), s.Thirst),
+		fmt.Sprintf("Fatigue %s %3d", m.renderBar(s.Fatigue), s.Fatigue),
+		fmt.Sprintf("Morale  %s %3d", m.renderBar(s.Morale), s.Morale),
+	}
+	return m.sectionBox("Stats", strings.Join(lines, "\n"), width)
+}
+
+func (m *model) renderBar(value int) string {
+	barWidth := 18
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	filled := value * barWidth / 100
+	if value == 100 {
+		filled = barWidth
+	}
+	fill := strings.Repeat("█", filled)
+	empty := strings.Repeat("░", barWidth-filled)
+	fillStyle := lipgloss.NewStyle().Foreground(m.styles.barFillColor)
+	emptyStyle := lipgloss.NewStyle().Foreground(m.styles.barEmptyColor)
+	return fillStyle.Render(fill) + emptyStyle.Render(empty)
+}
+
+func (m *model) renderSkillsSection(width int) string {
+	if len(m.survivor.Skills) == 0 {
+		return m.sectionBox("Skills", "No recorded skills", width)
+	}
+	type entry struct {
+		name string
+		lvl  int
+	}
+	var entries []entry
+	for skill, lvl := range m.survivor.Skills {
+		entries = append(entries, entry{name: readableSkill(skill), lvl: lvl})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+	var lines []string
+	for _, e := range entries {
+		lines = append(lines, fmt.Sprintf("%s: %d", e.name, e.lvl))
+	}
+	return m.sectionBox("Skills", strings.Join(lines, "\n"), width)
+}
+
+func (m *model) renderConditionsSection(width int) string {
+	if len(m.survivor.Conditions) == 0 {
+		return m.sectionBox("Conditions", "None", width)
+	}
+	var lines []string
+	for _, c := range m.survivor.Conditions {
+		lines = append(lines, strings.Title(string(c)))
+	}
+	return m.sectionBox("Conditions", strings.Join(lines, "\n"), width)
+}
+
+func (m *model) renderInventorySection(width int) string {
+	inv := m.survivor.Inventory
+	lines := []string{
+		fmt.Sprintf("Food: %.1fd • Water: %.1fL", inv.FoodDays, inv.WaterLiters),
+		"Weapons: " + formatList(inv.Weapons),
+		"Medical: " + formatList(inv.Medical),
+		"Tools: " + formatList(inv.Tools),
+		"Special: " + formatList(inv.Special),
+	}
+	if inv.Memento != "" {
+		lines = append(lines, "Memento: "+inv.Memento)
+	}
+	return m.sectionBox("Inventory", strings.Join(lines, "\n"), width)
+}
+
+func (m *model) renderMetersSection(width int) string {
+	if len(m.survivor.Meters) == 0 {
+		return ""
+	}
+	var lines []string
+	keys := make([]string, 0, len(m.survivor.Meters))
+	for k := range m.survivor.Meters {
+		keys = append(keys, string(k))
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		val := m.survivor.Meters[engine.Meter(key)]
+		lines = append(lines, fmt.Sprintf("%s %s %3d", strings.Title(key), m.renderBar(val), val))
+	}
+	return m.sectionBox("Meters", strings.Join(lines, "\n"), width)
+}
+
+func formatList(items []string) string {
+	if len(items) == 0 {
+		return "-"
+	}
+	return strings.Join(items, ", ")
+}
+
+func readableSkill(sk engine.Skill) string {
+	return strings.Title(strings.ReplaceAll(string(sk), "_", " "))
+}
+
+func (m *model) riskStyle(level engine.RiskLevel) lipgloss.Style {
+	switch level {
+	case engine.RiskLow:
+		return m.styles.riskLow
+	case engine.RiskModerate:
+		return m.styles.riskModerate
+	default:
+		return m.styles.riskHigh
+	}
 }
 
 func (m *model) renderTopBar() string {
@@ -571,11 +1175,11 @@ func (m *model) renderTopBar() string {
 		gap = 1
 	}
 	bar := left + strings.Repeat(" ", gap) + right
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render(bar)
+	return m.styles.topBar.Render(bar)
 }
 
 func (m *model) renderBottomBar() string {
-    left := "[1-6] choose  [Enter] commit custom  [Tab] cycle  [L] log  [A] archive  [S] settings  [M] menu  [?] help  [Q] quit"
+	left := "[1-6] choose  [Enter] commit custom  [Tab] cycle  [L] log  [A] archive  [S] settings  [M] menu  [?] help  [Q] quit"
 	cust := m.customInput
 	if !m.customEnabled {
 		cust = "(disabled)"
@@ -598,140 +1202,64 @@ func (m *model) renderBottomBar() string {
 			line = line[:w-3] + "..."
 		}
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(left + "\n" + line)
+	return m.styles.bottomBar.Render(left + "\n" + line)
 }
-
-// Build main scene area (scene + choices)
-func (m *model) buildMainScene() string {
-    var b strings.Builder
-    // 1) Character Overview (compact)
-    s := m.survivor
-    b.WriteString("# CHARACTER OVERVIEW\n")
-    b.WriteString(fmt.Sprintf("%s, %d — %s — %s (%d)\n\n", s.Name, s.Age, s.Background, s.Group, s.GroupSize))
-    // 2) Skills (compact)
-    b.WriteString("# SKILLS\n")
-    if len(s.Skills) == 0 {
-        b.WriteString("(none)\n\n")
-    } else {
-        names := make([]string, 0, len(s.Skills))
-        vals := map[string]int{}
-        for k, v := range s.Skills {
-            names = append(names, string(k))
-            vals[string(k)] = v
-        }
-        sort.Strings(names)
-        for i, name := range names {
-            if i > 0 { b.WriteString(", ") }
-            b.WriteString(fmt.Sprintf("%s:%d", abbrev(name), vals[name]))
-        }
-        b.WriteString("\n\n")
-    }
-    // 3) STATS (compact)
-    b.WriteString("# STATS\n")
-    b.WriteString(fmt.Sprintf("H %s %d  Hu %s %d  Th %s %d  Fa %s %d  Mo %s %d\n\n",
-        bar(s.Stats.Health), s.Stats.Health,
-        bar(s.Stats.Hunger), s.Stats.Hunger,
-        bar(s.Stats.Thirst), s.Stats.Thirst,
-        bar(s.Stats.Fatigue), s.Stats.Fatigue,
-        bar(s.Stats.Morale), s.Stats.Morale,
-    ))
-    // 4) INVENTORY (compact)
-    b.WriteString("# INVENTORY\n")
-    inv := s.Inventory
-    b.WriteString(fmt.Sprintf("Weapons %d  Food %.1fd  Water %.1fL  Med %d  Tools %d\n\n",
-        len(inv.Weapons), inv.FoodDays, inv.WaterLiters, len(inv.Medical), len(inv.Tools)))
-    // 5) SCENE
-    b.WriteString("# SCENE\n")
-    b.WriteString(m.sceneRendered)
-    b.WriteString("\n\n# CHOICES\n")
-    for _, c := range m.choices {
-        b.WriteString(fmt.Sprintf("[%d] %s | Cost:%s | Risk:%s\n", c.Index+1, c.Label, formatCost(c.Cost), c.Risk))
-    }
-    return b.String()
-}
-
-// Sidebar condensed sections
-func (m *model) buildSidebar() string {
-    s := m.survivor
-    var b strings.Builder
-    b.WriteString("CHARACTER\n")
-    b.WriteString(fmt.Sprintf("%s (%s)\n", s.Name, s.Background))
-    b.WriteString(fmt.Sprintf("Age %d  Group %s(%d)\n", s.Age, s.Group, s.GroupSize))
-    b.WriteString(fmt.Sprintf("Body %s  ToD %s\n", s.BodyTemp, s.Environment.TimeOfDay))
-    b.WriteString(fmt.Sprintf("%s\n\n", s.Location))
-	// Stats bars condensed
-	b.WriteString("STATS\n")
-	b.WriteString(sb("H", s.Stats.Health))
-	b.WriteString(sb("Hu", s.Stats.Hunger))
-	b.WriteString(sb("Th", s.Stats.Thirst))
-	b.WriteString(sb("Fa", s.Stats.Fatigue))
-	b.WriteString(sb("Mo", s.Stats.Morale) + "\n\n")
-    // Inventory
-    inv := s.Inventory
-    b.WriteString("INV\n")
-    b.WriteString(fmt.Sprintf("Weapons %d\n", len(inv.Weapons)))
-    b.WriteString(fmt.Sprintf("Food %.1fd  Water %.1fL\n", inv.FoodDays, inv.WaterLiters))
-    b.WriteString(fmt.Sprintf("Medical %d  Tools %d\n", len(inv.Medical), len(inv.Tools)))
-    if inv.Memento != "" { b.WriteString("Memento ✓\n") }
-    b.WriteString("\n")
-	// Conditions
-	b.WriteString("COND\n")
-	if len(s.Conditions) == 0 {
-		b.WriteString("none\n\n")
-	} else {
-		for _, c := range s.Conditions {
-			b.WriteString(string(c) + " ")
-		}
-		b.WriteString("\n\n")
-	}
-    // Traits
-    b.WriteString("TRAITS\n")
-    if len(s.Traits) == 0 {
-        b.WriteString("(none)\n\n")
-    } else {
-        for i, t := range s.Traits {
-            if i > 0 { b.WriteString(", ") }
-            b.WriteString(string(t))
-        }
-        b.WriteString("\n\n")
-    }
-    // Skills grid all
-	b.WriteString("SKILLS\n")
-	if len(s.Skills) == 0 {
-		b.WriteString("(none)\n")
-	} else {
-		names := make([]string, 0, len(s.Skills))
-		vals := map[string]int{}
-		for k, v := range s.Skills {
-			names = append(names, string(k))
-			vals[string(k)] = v
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			b.WriteString(fmt.Sprintf("%s:%d ", abbrev(name), vals[name]))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-func sb(label string, v int) string { return fmt.Sprintf("%-2s %s %3d\n", label, bar(v), v) }
 
 // Main menu rendering.
 func (m *model) renderMainMenu() string {
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).Width(50)
-    content := "ZERO POINT — MAIN MENU\n\n[1] New Game\n[2] Continue Game\n[3] World Settings\n[4] Survivor Archive\n[5] About / Rules\n\nQ Quit"
-	return box.Render(content)
+	width := m.width
+	if width < 50 {
+		width = 50
+	}
+	height := m.height
+	if height < 12 {
+		height = 12
+	}
+	header := m.styles.title.Render("ZERO POINT — MAIN MENU")
+	options := []string{
+		"[1] New Game",
+		"[2] Continue Game",
+		"[3] World Settings",
+		"[4] Survivor Archive",
+		"[5] About / Rules",
+		"",
+		"Q Quit",
+	}
+	if m.startupErr != nil {
+		msg := m.errorMessage
+		if msg == "" {
+			msg = "DeepSeek API key missing."
+		}
+		options = append(options, "", m.styles.muted.Render(msg))
+	}
+	body := strings.Join(options, "\n")
+	box := m.styles.menuBox.Width(46).Render(lipgloss.JoinVertical(lipgloss.Left, header, body))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m *model) renderWorldConfig() string {
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).Width(60)
 	scar := "Off"
 	if m.preRunScarcity {
 		scar = "On"
 	}
-	content := fmt.Sprintf("WORLD SETTINGS (Pre-Run)\n\nSeed: %s\nScarcity: %s (1 toggle)\nText Density: %s (2 cycle)\n[3] Regenerate Seed\n[4] Back\n", m.preRunSeedText, scar, m.preRunDensity)
-	return box.Render(content)
+	seedHint := "(press Enter to edit)"
+	if m.preRunSeedEditing {
+		seedHint = "(editing — Esc to stop)"
+	}
+	content := fmt.Sprintf(
+		"WORLD SETTINGS (Pre-Run)\n\nSeed [%d/%d]: %s %s\nScarcity: %s (1 toggle)\nText Density: %s (2 cycle)\nTheme: %s (3 cycle)\n[4] Regenerate Seed\n[5] Back\n",
+		len(m.preRunSeedBuffer), maxSeedLength, m.preRunSeedBuffer, seedHint, scar, m.preRunDensity, m.preRunTheme,
+	)
+	box := m.styles.menuBox.Width(62).Render(content)
+	width := m.width
+	if width < 62 {
+		width = 62
+	}
+	height := m.height
+	if height < 12 {
+		height = 12
+	}
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func cycleDensityLocal(cur string) string {
@@ -788,6 +1316,9 @@ func (m *model) refreshSettings() {
 	sr := store.NewSettingsRepo(m.db)
 	if s, err := sr.Get(m.ctx, m.runID); err == nil {
 		m.settings = s
+		if s.Theme != "" {
+			m.applyTheme(s.Theme)
+		}
 	}
 }
 func (m *model) toggleScarcity() {
@@ -811,7 +1342,7 @@ func (m *model) forceRegenerateChoices() {
 		m.md = "Choice generation failed: " + err.Error()
 		return
 	}
-	choices, eventCtx, err := engine.GenerateChoices(m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+	choices, eventCtx, err := engine.GenerateChoices(m.ctx, m.planner, m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
 	if err != nil {
 		m.md = "Choice generation failed: " + err.Error()
 		return
@@ -824,14 +1355,14 @@ func (m *model) forceRegenerateChoices() {
 func (m *model) handleCustomAction() {
 	// enforce 2-scene cooldown since last custom (stored turn number)
 	if m.survivor.Meters != nil {
-            if last, ok := m.survivor.Meters[engine.MeterCustomLastTurn]; ok {
-                if m.turn-last < 2 { // need at least 2 full scenes gap
-                    m.customStatus = "Custom action unavailable now"
-                    m.customEnabled = false
-                    m.md = m.renderSceneLayout()
-                    return
-                }
-            }
+		if last, ok := m.survivor.Meters[engine.MeterCustomLastTurn]; ok {
+			if m.turn-last < 2 { // need at least 2 full scenes gap
+				m.customStatus = "Custom action unavailable now"
+				m.customEnabled = false
+				m.md = m.renderSceneLayout()
+				return
+			}
+		}
 	}
 	choice, ok, reason := engine.ValidateCustomAction(m.customInput, m.survivor)
 	if !ok {
@@ -880,8 +1411,7 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 		if outMD == "" {
 			generated, err := m.narrator.Outcome(m.ctx, stateAfter, c, res.Delta)
 			if err != nil {
-				fallback := text.NewMinimalFallbackNarrator()
-				generated, _ = fallback.Outcome(m.ctx, stateAfter, c, res.Delta)
+				return err
 			}
 			outMD = generated
 			if outcomeHash != nil {
@@ -906,12 +1436,6 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 		}, recap)
 		if eventCtx != nil {
 			cooldown := prevTurn + eventCtx.Event.CooldownScenes + 1
-			arcID := ""
-			arcStep := 0
-			if eventCtx.Event.Arc != nil {
-				arcID = eventCtx.Event.Arc.ID
-				arcStep = eventCtx.Event.Arc.Step
-			}
 			rec := store.EventInstanceRecord{
 				RunID:              m.runID,
 				SurvivorID:         m.survivorID,
@@ -919,8 +1443,6 @@ func (m *model) resolveChoiceTx(c engine.Choice) error {
 				WorldDay:           m.world.CurrentDay,
 				SceneIdx:           prevTurn,
 				CooldownUntilScene: cooldown,
-				ArcID:              arcID,
-				ArcStep:            arcStep,
 				OnceFired:          eventCtx.Event.OncePerRun,
 			}
 			if err := eventRepo.Insert(m.ctx, tx, rec); err != nil {
@@ -1004,7 +1526,7 @@ func (m *model) spawnReplacementTx() error {
 		if err != nil {
 			return err
 		}
-		choices, eventCtx, err := engine.GenerateChoices(m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
+		choices, eventCtx, err := engine.GenerateChoices(m.ctx, m.planner, m.choiceStream("choices"), &m.survivor, history, m.turn, engine.WithScarcity(m.settings.Scarcity), engine.WithTextDensity(m.settings.TextDensity), engine.WithInfectedPresent(m.survivor.Environment.Infected), engine.WithDifficulty(engine.Difficulty(m.settings.Difficulty)))
 		if err != nil {
 			return err
 		}
@@ -1023,8 +1545,7 @@ func (m *model) spawnReplacementTx() error {
 		if md == "" {
 			generated, err := m.narrator.Scene(m.ctx, state)
 			if err != nil {
-				fallback := text.NewMinimalFallbackNarrator()
-				generated, _ = fallback.Scene(m.ctx, state)
+				return err
 			}
 			md = generated
 			if sceneHash != nil {
@@ -1085,21 +1606,6 @@ func (m *model) exportRun() {
 
 // buildGameView kept for any non-layout fallback (returns scene layout)
 func (m *model) buildGameView() string { return m.renderSceneLayout() }
-
-func bar(v int) string {
-	width := 10
-	fill := int((float64(v)/100.0)*float64(width) + 0.5)
-	if fill > width {
-		fill = width
-	}
-	return strings.Repeat("█", fill) + strings.Repeat("·", width-fill)
-}
-func abbrev(k string) string {
-	if len(k) <= 3 {
-		return k
-	}
-	return k[:3]
-}
 
 // Helpers reintroduced after refactor ----------------------------------------
 func formatCost(c engine.Cost) string {
@@ -1189,13 +1695,13 @@ func (m *model) renderHelp() string {
 	return fmt.Sprintf("ABOUT / RULES\n\nSeed & Rules: %s • %s\n\nYou manage sequential survivors in the early outbreak (LAD gate)."+
 		" Maintain core needs (health, hunger, thirst, fatigue, morale). Infected risk only after Local Arrival Day."+
 		" Each turn: read scene, pick 1 action (1-6) or craft a concise custom verb phrase. Outcomes adjust stats and may cause death."+
-		" Death creates an archive card; a new survivor appears immediately.\n\nControls: 1-6 choose | Enter custom | Tab cycle views | L logs | A archive | S settings | E export | F6 LAD debug | Q quit.\n\nEsc returns from subviews.",
+		" Death creates an archive card; a new survivor appears immediately.\n\nControls: 1-6 choose | Enter custom | Tab cycle views | L logs | A archive | S settings | Y timeline | T scarcity (settings) | D density (settings) | C theme (settings) | E export | F6 LAD debug | Q quit.\n\nEsc returns from subviews.",
 		m.runSeed.Text, m.rulesVersion)
 }
 
 func (m *model) renderSettings() string {
-	return fmt.Sprintf("Settings\nSeed & Rules: %s • %s\nScarcity: %v (t toggle)\nDensity: %s (d cycle)\nNarrator: %s (n toggle on/off)\nLanguage: %s (g cycle placeholder)\n",
-		m.runSeed.Text, m.rulesVersion, m.settings.Scarcity, m.settings.TextDensity, m.settings.Narrator, m.settings.Language)
+	return fmt.Sprintf("Settings\nSeed & Rules: %s • %s\nScarcity: %v (t toggle)\nDensity: %s (d cycle)\nTheme: %s (c cycle)\nLanguage: %s (g cycle placeholder)\n",
+		m.runSeed.Text, m.rulesVersion, m.settings.Scarcity, m.settings.TextDensity, m.settings.Theme, m.settings.Language)
 }
 
 // --- Added implementations to fix missing methods ---
@@ -1239,16 +1745,6 @@ func (m *model) renderTimeline() string {
 	return title + "\n" + strings.Join(view, "\n")
 }
 
-// toggleNarrator flips narrator setting between 'auto' and 'off' and refreshes settings.
-func (m *model) toggleNarrator() {
-	if m.runID == uuid.Nil {
-		return
-	}
-	sr := store.NewSettingsRepo(m.db)
-	_ = sr.ToggleNarrator(m.ctx, m.runID)
-	m.refreshSettings()
-}
-
 // cycleLanguage is a placeholder; persist a stable value or simple cycle.
 func (m *model) cycleLanguage() {
 	if m.runID == uuid.Nil {
@@ -1260,6 +1756,19 @@ func (m *model) cycleLanguage() {
 		next = "en"
 	}
 	sr := store.NewSettingsRepo(m.db)
-	_ = sr.Upsert(m.ctx, m.runID, m.settings.Scarcity, m.settings.TextDensity, next, m.settings.Narrator, m.settings.Difficulty)
+	_ = sr.Upsert(m.ctx, m.runID, m.settings.Scarcity, m.settings.TextDensity, next, m.settings.Narrator, m.settings.Difficulty, m.settings.Theme)
 	m.refreshSettings()
+}
+
+func (m *model) cycleTheme() {
+	if m.runID == uuid.Nil {
+		m.preRunTheme = nextThemeName(m.preRunTheme, 1)
+		m.applyTheme(m.preRunTheme)
+		return
+	}
+	next := nextThemeName(m.settings.Theme, 1)
+	sr := store.NewSettingsRepo(m.db)
+	_ = sr.Upsert(m.ctx, m.runID, m.settings.Scarcity, m.settings.TextDensity, m.settings.Language, m.settings.Narrator, m.settings.Difficulty, next)
+	m.refreshSettings()
+	m.forceRegenerateChoices()
 }

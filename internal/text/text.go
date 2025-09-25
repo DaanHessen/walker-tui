@@ -8,191 +8,280 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DaanHessen/walker-tui/internal/engine"
 )
 
-// Narrator interface unchanged.
+// Narrator produces scene and outcome prose.
 type Narrator interface {
 	Scene(ctx context.Context, st any) (string, error)
 	Outcome(ctx context.Context, st any, ch any, up any) (string, error)
 }
 
-// MinimalFallbackNarrator: emergency only, neutral concise sentences.
-type MinimalFallbackNarrator struct{}
-
-func NewMinimalFallbackNarrator() Narrator { return &MinimalFallbackNarrator{} }
-
-func (m *MinimalFallbackNarrator) Scene(ctx context.Context, st any) (string, error) {
-	state, _ := st.(map[string]any)
-	var parts []string
-	grab := func(k string) string {
-		if v, ok := state[k]; ok {
-			return fmt.Sprintf("%v", v)
-		}
-		return ""
-	}
-	region := grab("region")
-	tod := grab("time_of_day")
-	weather := grab("weather")
-	season := grab("season")
-	// world day / LAD are intentionally not surfaced in fallback text to avoid meta leak
-	infectedPresent := false
-	if v, ok := state["infected_present"]; ok {
-		infectedPresent = v == true || strings.EqualFold(fmt.Sprintf("%v", v), "true")
-	}
-	inv := "limited supplies"
-	if invMap, ok := state["inventory"].(engine.Inventory); ok {
-		inv = fmt.Sprintf("%.1fd food, %.1fL water", invMap.FoodDays, invMap.WaterLiters)
-	}
-	parts = append(parts, fmt.Sprintf("You are in %s this %s. The %s weather in %s feels typical for %s.", region, tod, weather, season, season))
-	if infectedPresent {
-		parts = append(parts, "Activity in the open has become risky; you keep distance and watch lines of sight.")
-	} else {
-		// Avoid mentioning banned words pre-arrival; keep it neutral.
-		parts = append(parts, "Open spaces remain unnervingly quiet; streets and lots show little movement.")
-	}
-	parts = append(parts, fmt.Sprintf("Your current provisions are %s.", inv))
-	parts = append(parts, "You weigh immediate needs against risk.")
-	return strings.Join(parts, " "), nil
-}
-
-func (m *MinimalFallbackNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
-	choice, _ := ch.(engine.Choice)
-	delta, _ := up.(engine.Stats)
-	var segs []string
-	segs = append(segs, fmt.Sprintf("You commit to '%s'.", choice.Label))
-	// reference deltas implicitly
-	if delta.Fatigue > 0 {
-		segs = append(segs, "The effort leaves you a little more tired.")
-	} else if delta.Fatigue < 0 {
-		segs = append(segs, "You feel a touch more rested.")
-	}
-	if delta.Hunger < 0 || delta.Thirst < 0 {
-		segs = append(segs, "Some basic needs ease slightly.")
-	}
-	if delta.Health < 0 {
-		segs = append(segs, "You take a minor hit to your well-being.")
-	}
-	if delta.Morale != 0 {
-		if delta.Morale > 0 {
-			segs = append(segs, "Your resolve steadies a little.")
-		} else {
-			segs = append(segs, "Your mood dips.")
-		}
-	}
-	// Ensure at least three sentences in fallback outcome
-	if len(segs) < 3 {
-		segs = append(segs, "You take stock of your condition and surroundings.")
-	}
-	segs = append(segs, "You reassess your immediate options.")
-	return strings.Join(segs, " "), nil
-}
-
-// Fallback wrapper.
-func WithFallback(primary, fallback Narrator) Narrator {
-	return &fallbackNarrator{p: primary, f: fallback}
-}
-
-type fallbackNarrator struct{ p, f Narrator }
-
-func (n *fallbackNarrator) Scene(ctx context.Context, st any) (string, error) {
-	if n.p == nil {
-		return n.f.Scene(ctx, st)
-	}
-	if s, err := n.p.Scene(ctx, st); err == nil {
-		return s, nil
-	}
-	return n.f.Scene(ctx, st)
-}
-func (n *fallbackNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
-	if n.p == nil {
-		return n.f.Outcome(ctx, st, ch, up)
-	}
-	if s, err := n.p.Outcome(ctx, st, ch, up); err == nil {
-		return s, nil
-	}
-	return n.f.Outcome(ctx, st, ch, up)
-}
-
-// DeepSeek Reasoner narrator implementation.
-type deepSeekNarrator struct {
+// DeepSeek wraps the DeepSeek Reasoner model for both narration and director planning.
+type DeepSeek struct {
 	apiKey string
 	client *http.Client
+	prompt string
 }
 
-func NewDeepSeekNarrator(apiKey string) (Narrator, error) {
-	if apiKey == "" {
-		return nil, errors.New("missing api key")
+func NewDeepSeek(apiKey string) (*DeepSeek, error) {
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, errors.New("missing deepseek api key")
 	}
-	return &deepSeekNarrator{apiKey: apiKey, client: &http.Client{Timeout: 2 * time.Second}}, nil
+	prompt, err := getSystemPrompt()
+	if err != nil {
+		return nil, err
+	}
+	return &DeepSeek{apiKey: apiKey, client: &http.Client{Timeout: 2 * time.Second}, prompt: prompt}, nil
 }
 
-var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
-var ctrlRegexp = regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
-
-func (d *deepSeekNarrator) Scene(ctx context.Context, st any) (string, error) {
-	return d.call(ctx, st, nil, nil, true)
-}
-func (d *deepSeekNarrator) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
-	return d.call(ctx, st, ch, up, false)
-}
-
-// call constructs prompts per spec.
-func (d *deepSeekNarrator) call(ctx context.Context, st any, ch any, up any, isScene bool) (string, error) {
-	cleanState := sanitizeState(st)
-	// inject context hint for timezone/local time if present
-	if tz, ok := cleanState["timezone"].(string); ok {
-		if ldt, ok2 := cleanState["local_datetime"].(string); ok2 {
-			cleanState["context_hint"] = fmt.Sprintf("Local time %s (%s)", ldt, tz)
+func (d *DeepSeek) Scene(ctx context.Context, st any) (string, error) {
+	state := sanitizeState(st)
+	if tz, ok := state["timezone"].(string); ok {
+		if ldt, ok2 := state["local_datetime"].(string); ok2 {
+			state["context_hint"] = fmt.Sprintf("Local time %s (%s)", ldt, tz)
 		}
 	}
-	stateJSON, _ := json.Marshal(cleanState)
-	var userJSON bytes.Buffer
-	userJSON.Write(stateJSON)
-	var messages []dsMessage
-	if isScene {
-		messages = []dsMessage{
-			{Role: "system", Content: "You are the narrator for a grounded survival TUI game. Write a single **120–250 word** paragraph in **second person, present tense**, strictly from the survivor's current perspective. **No meta, no rules, no statistics, no odds, no headings or lists.** Do not invent items, skills, or conditions. Respect that **open-area infected are not present if the given LAD has not been reached**. Maintain realism, subtle tension, and sensory detail. If context_hint is present you may reflect ambient time cues subtly."},
-			{Role: "user", Content: userJSON.String()},
-		}
-	} else {
-		choiceJSON, _ := json.Marshal(ch)
-		deltaJSON, _ := json.Marshal(up)
-		combined := fmt.Sprintf("{\n\"state\": %s,\n\"choice\": %s,\n\"update\": %s\n}", userJSON.String(), string(choiceJSON), string(deltaJSON))
-		messages = []dsMessage{
-			{Role: "system", Content: "Write a single **100–200 word** paragraph in second person, present tense, strictly from the survivor's perspective. Describe only the immediate consequences of the chosen action. **No meta, no rules, no statistics, no odds, no headings or lists.** Do not invent items or mechanics. Subtly reflect the provided UPDATE deltas. Obey the LAD gate. If context_hint is present optionally hint at time-of-day without stating exact numbers."},
-			{Role: "user", Content: combined},
+	prompt, err := buildScenePrompt(state)
+	if err != nil {
+		return "", err
+	}
+	messages := []dsMessage{
+		{Role: "system", Content: d.prompt},
+		{Role: "user", Content: prompt},
+	}
+	text, err := d.chat(ctx, messages, 700)
+	if err != nil {
+		return "", err
+	}
+	cleaned := sanitizeOutput(text)
+	if !validateNarrative(cleaned, true, state) {
+		return "", errors.New("scene validation failed")
+	}
+	return cleaned, nil
+}
+
+func (d *DeepSeek) Outcome(ctx context.Context, st any, ch any, up any) (string, error) {
+	state := sanitizeState(st)
+	if tz, ok := state["timezone"].(string); ok {
+		if ldt, ok2 := state["local_datetime"].(string); ok2 {
+			state["context_hint"] = fmt.Sprintf("Local time %s (%s)", ldt, tz)
 		}
 	}
-	maxTok := 600
-	if !isScene {
-		maxTok = 400
+	prompt, err := buildOutcomePrompt(state, ch, up)
+	if err != nil {
+		return "", err
 	}
-	reqBody, _ := json.Marshal(dsRequest{Model: "deepseek-reasoner", Messages: messages, MaxTokens: maxTok})
+	messages := []dsMessage{
+		{Role: "system", Content: d.prompt},
+		{Role: "user", Content: prompt},
+	}
+	text, err := d.chat(ctx, messages, 520)
+	if err != nil {
+		return "", err
+	}
+	cleaned := sanitizeOutput(text)
+	if !validateNarrative(cleaned, false, state) {
+		return "", errors.New("outcome validation failed")
+	}
+	return cleaned, nil
+}
+
+func (d *DeepSeek) PlanEvent(ctx context.Context, req engine.DirectorRequest) (engine.DirectorPlan, error) {
+	if len(req.Available) == 0 {
+		return engine.DirectorPlan{}, errors.New("no available events")
+	}
+	prompt, err := buildDirectorPrompt(req)
+	if err != nil {
+		return engine.DirectorPlan{}, err
+	}
+	messages := []dsMessage{
+		{Role: "system", Content: d.prompt},
+		{Role: "user", Content: prompt},
+	}
+	raw, err := d.chat(ctx, messages, 600)
+	if err != nil {
+		return engine.DirectorPlan{}, err
+	}
+	cleaned := sanitizeOutput(raw)
+	var resp directorResponse
+	if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
+		return engine.DirectorPlan{}, fmt.Errorf("director json parse: %w", err)
+	}
+	if len(resp.Choices) < 2 || len(resp.Choices) > 6 {
+		return engine.DirectorPlan{}, fmt.Errorf("director returned %d choices", len(resp.Choices))
+	}
+	plan := engine.DirectorPlan{
+		EventID:   strings.TrimSpace(resp.EventID),
+		EventName: strings.TrimSpace(resp.EventName),
+		Guidance:  strings.TrimSpace(resp.Guidance),
+	}
+	for _, ch := range resp.Choices {
+		plan.Choices = append(plan.Choices, engine.PlannedChoice{
+			Label:     ch.Label,
+			Archetype: ch.Archetype,
+			Cost: engine.PlanCost{
+				Time:    ch.BaseCost.Time,
+				Fatigue: ch.BaseCost.Fatigue,
+				Hunger:  ch.BaseCost.Hunger,
+				Thirst:  ch.BaseCost.Thirst,
+			},
+			Risk: ch.BaseRisk,
+		})
+	}
+	return plan, nil
+}
+
+type directorResponse struct {
+	EventID   string                   `json:"event_id"`
+	EventName string                   `json:"event_name"`
+	Guidance  string                   `json:"guidance"`
+	Choices   []directorChoiceResponse `json:"choices"`
+}
+
+type directorChoiceResponse struct {
+	Label     string   `json:"label"`
+	Archetype string   `json:"archetype"`
+	BaseRisk  string   `json:"base_risk"`
+	BaseCost  costSpec `json:"base_cost"`
+}
+
+type costSpec struct {
+	Time    int `json:"time"`
+	Fatigue int `json:"fatigue"`
+	Hunger  int `json:"hunger"`
+	Thirst  int `json:"thirst"`
+}
+
+func buildScenePrompt(state map[string]any) (string, error) {
+	payload := map[string]any{
+		"role":         "narrator",
+		"instructions": "Write a single 120-250 word paragraph in second person, present tense. No lists, no odds, no mechanics or meta commentary. Stay grounded in the survivor's current perceptions only.",
+		"state":        state,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func buildOutcomePrompt(state map[string]any, choice any, update any) (string, error) {
+	payload := map[string]any{
+		"role":         "outcome_narrator",
+		"instructions": "Write a single 100-200 word paragraph in second person, present tense describing only immediate consequences. Weave in UPDATE deltas implicitly. No lists, no stats, no odds, no meta.",
+		"state":        state,
+		"choice":       choice,
+		"update":       update,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func buildDirectorPrompt(req engine.DirectorRequest) (string, error) {
+	stateJSON, err := json.MarshalIndent(req.State, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	eventsJSON, err := json.MarshalIndent(req.Available, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	historyJSON, err := json.MarshalIndent(req.History, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	archetypes := engine.AllowedArchetypes()
+	payload := map[string]any{
+		"role":               "director",
+		"instructions":       "Select one event from available_events and propose 2-6 choices. Respond with JSON only, matching schema {event_id, event_name, guidance, choices:[{label, archetype, base_cost:{time,fatigue,hunger,thirst}, base_risk}]}. Use only archetypes from allowed_archetypes.",
+		"allowed_archetypes": archetypes,
+		"available_events":   json.RawMessage(eventsJSON),
+		"state":              json.RawMessage(stateJSON),
+		"history":            json.RawMessage(historyJSON),
+		"scene_index":        req.SceneIndex,
+		"scarcity":           req.Scarcity,
+		"text_density":       req.TextDensity,
+		"difficulty":         req.Difficulty,
+		"infected_local":     req.InfectedLocal,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+var (
+	systemPromptOnce sync.Once
+	cachedPrompt     string
+	cachedPromptErr  error
+)
+
+func getSystemPrompt() (string, error) {
+	systemPromptOnce.Do(func() {
+		if override := strings.TrimSpace(os.Getenv("ZEROPOINT_PROMPT_PATH")); override != "" {
+			data, err := os.ReadFile(override)
+			if err != nil {
+				cachedPromptErr = fmt.Errorf("load prompt override: %w", err)
+				return
+			}
+			cachedPrompt = string(data)
+			cachedPromptErr = nil
+			return
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			cachedPromptErr = err
+			return
+		}
+		candidates := []string{
+			filepath.Join(wd, "docs", "instructions.md"),
+			filepath.Join(wd, "..", "docs", "instructions.md"),
+			filepath.Join(wd, "..", "..", "docs", "instructions.md"),
+		}
+		for _, path := range candidates {
+			if data, err := os.ReadFile(path); err == nil {
+				cachedPrompt = string(data)
+				cachedPromptErr = nil
+				return
+			}
+		}
+		cachedPromptErr = fmt.Errorf("unable to load docs/instructions.md (tried %s)", strings.Join(candidates, ", "))
+	})
+	return cachedPrompt, cachedPromptErr
+}
+
+func (d *DeepSeek) chat(ctx context.Context, messages []dsMessage, maxTokens int) (string, error) {
+	reqBody, err := json.Marshal(dsRequest{Model: "deepseek-reasoner", Messages: messages, MaxTokens: maxTokens})
+	if err != nil {
+		return "", err
+	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return "", ctx.Err()
-		default:
 		}
-		resp, err := d.doRequest(ctx, reqBody)
+		res, err := d.doRequest(ctx, reqBody)
 		if err != nil {
 			lastErr = err
 			backoff(attempt)
 			continue
 		}
-		text := sanitizeOutput(resp)
-		if !validateNarrative(text, isScene, cleanState) {
-			lastErr = errors.New("validation failed")
-			backoff(attempt)
-			continue
-		}
-		return text, nil
+		return res, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("deepseek request failed")
 	}
 	return "", lastErr
 }
@@ -203,22 +292,25 @@ type dsMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
+
 type dsRequest struct {
 	Model     string      `json:"model"`
 	Messages  []dsMessage `json:"messages"`
 	MaxTokens int         `json:"max_tokens,omitempty"`
 }
+
 type dsChoice struct {
 	Message struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"message"`
 }
+
 type dsResponse struct {
 	Choices []dsChoice `json:"choices"`
 }
 
-func (d *deepSeekNarrator) doRequest(ctx context.Context, body []byte) (string, error) {
+func (d *DeepSeek) doRequest(ctx context.Context, body []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.deepseek.com/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -243,7 +335,9 @@ func (d *deepSeekNarrator) doRequest(ctx context.Context, body []byte) (string, 
 	return dr.Choices[0].Message.Content, nil
 }
 
-// Validation ---------------------------------------------------------
+var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+var ctrlRegexp = regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
+
 func validateNarrative(s string, isScene bool, st map[string]any) bool {
 	wc := wordCount(s)
 	if isScene {
@@ -278,7 +372,6 @@ func validateNarrative(s string, isScene bool, st map[string]any) bool {
 
 func wordCount(s string) int { return len(strings.Fields(s)) }
 
-// sanitize / helpers -------------------------------------------------
 func sanitizeOutput(s string) string {
 	s = ansiRegexp.ReplaceAllString(s, "")
 	s = ctrlRegexp.ReplaceAllString(s, "")
@@ -297,7 +390,9 @@ func sanitizeState(st any) map[string]any {
 	return clean
 }
 
-func backoff(attempt int) { time.Sleep(time.Duration(200+attempt*250) * time.Millisecond) }
+func backoff(attempt int) {
+	time.Sleep(time.Duration(200+attempt*250) * time.Millisecond)
+}
 
 func hashPayload(payload any) ([]byte, error) {
 	data, err := json.Marshal(payload)

@@ -1,12 +1,13 @@
 # Zero Point (Prototype)
 
 ## Quick Start
-Requirements: Go 1.22+, Docker.
+Requirements: Go 1.22+, Docker, DeepSeek API access.
 
 ```bash
 make db-up       # start postgres (docker)
 make migrate-up  # apply migrations
-make run         # launch game (AI off unless DEEPSEEK_API_KEY set)
+export DEEPSEEK_API_KEY=sk-... # required: director + narrator
+make run         # launch game
 ```
 Default DSN auto-applied if unset:
 `postgres://dev:dev@localhost:5432/zeropoint?sslmode=disable`
@@ -20,9 +21,10 @@ Default DSN auto-applied if unset:
 - s settings view
 - t toggle scarcity (settings)
 - d cycle text density (settings)
-- n toggle narrator on/off (settings)
+- c cycle theme (settings)
 - e export run to `~/.zero-point/exports`
 - pgup/pgdown scroll scene, home/end jump
+- y timeline view (PgUp/PgDn scroll, Esc to exit)
 - ? help toggle
 - q / ctrl+c quit
 
@@ -30,33 +32,34 @@ Default DSN auto-applied if unset:
 - Postgres persistence (runs, survivors, scenes, choices, updates, outcomes, master logs, archive cards, settings)
 - Enum constraints migration + idempotent column rename
 - LAD heuristic + infection gating (risk softened pre-arrival) + debug toggle
-- Deterministic RNG seed injection + pre-run world config (seed, scarcity, density)
+- Deterministic RNG seed injection + pre-run world config (seed, scarcity, density, theme)
 - Transactional turn resolution + death -> archive + immediate respawn
 - Multi-day loop (advances every 6 scenes placeholder)
+- DeepSeek-only director + narrator driven by `docs/instructions.md`
+- Loading overlay with rotating DB-backed tips while new runs bootstrap
 - Choice generation influenced by scarcity, density, infection presence, basic skill hooks
 - Custom action system with archetype mapping + gating (fatigue, critical needs, cooldown)
-- AI narrator (DeepSeek Reasoner optional) with fallback minimal narrator and runtime toggle
+- Themed TUI (Catppuccin default + Dracula/Gruvbox/Solarized Dark)
 - Timezone + local datetime in narrative state
 - Archive cards + interactive archive browser
 - Export full run narrative as markdown
-- Settings view & dynamic choice regeneration
+- Settings view & dynamic choice regeneration, including theme preview
 - Responsive TUI layout (top bar, sidebar, bottom bar, scrolling main pane)
+- Timeline view with scrollback history
 
 ## Planned / Not Yet
 - Richer choice taxonomy (travel, crafting, social, shelter)
 - Deeper skill progression & stat-driven modifiers
 - Conditions system with mechanical effects
 - Enhanced archive (AI epitaph, pivotal moments synthesis)
-- Master log storyline stitching & timeline panel
 - Streaming AI + improved retry/backoff
 - Language switching / localization
 - Unit & integration tests (LAD gating, first survivor distribution, custom action mapping, migration idempotence)
-- Scrollback for timeline / dedicated log panel improvements
 - Better world settings (difficulty presets, start region select)
 - License text
 
 ## Environment
-Set `DEEPSEEK_API_KEY` to enable AI narration.
+`DEEPSEEK_API_KEY` **must** be set; without it the TUI shows a blocking error screen.
 
 ## License
 TBD
@@ -64,11 +67,9 @@ TBD
 # Walker TUI
 
 ## Recent Additions
-- Timeline view (press 'y') with scroll (PgUp/PgDn, arrows, Home/End, Esc to exit)
+- Loading screen with rotating worldbuilding tips while DeepSeek warms up
+- Theme selector (Catppuccin, Dracula, Gruvbox, Solarized Dark)
 - Basic skill progression tied to choice archetypes (forage, rest, observe, organize, etc.)
-
-## Controls (Extended)
-- y: Open timeline view
 
 ### Difficulty Presets (Prototype)
 Easy: +20% forage yield, lower fatigue drains.

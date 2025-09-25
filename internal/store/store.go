@@ -219,15 +219,12 @@ type EventInstanceRecord struct {
 	WorldDay           int
 	SceneIdx           int
 	CooldownUntilScene int
-	ArcID              string
-	ArcStep            int
 	OnceFired          bool
 }
 
 func (er *EventRepo) LoadHistory(ctx context.Context, tx *gorm.DB, runID uuid.UUID) (engine.EventHistory, error) {
 	hist := engine.EventHistory{
 		Events: make(map[string]engine.EventState),
-		Arcs:   make(map[string]engine.ArcState),
 	}
 	if runID == uuid.Nil {
 		return hist, nil
@@ -236,7 +233,7 @@ func (er *EventRepo) LoadHistory(ctx context.Context, tx *gorm.DB, runID uuid.UU
 	if tx != nil {
 		db = tx.WithContext(ctx)
 	}
-	rows, err := db.Raw(`SELECT event_id, scene_idx, cooldown_until_scene, once_fired, COALESCE(arc_id,''), COALESCE(arc_step,0) FROM event_instances WHERE run_id = ? ORDER BY scene_idx DESC, created_at DESC`, runID).Rows()
+	rows, err := db.Raw(`SELECT event_id, scene_idx, cooldown_until_scene, once_fired FROM event_instances WHERE run_id = ? ORDER BY scene_idx DESC, created_at DESC`, runID).Rows()
 	if err != nil {
 		return hist, err
 	}
@@ -247,10 +244,8 @@ func (er *EventRepo) LoadHistory(ctx context.Context, tx *gorm.DB, runID uuid.UU
 			sceneIdx  int
 			cooldown  int
 			onceFired bool
-			arcID     sql.NullString
-			arcStep   sql.NullInt64
 		)
-		if err := rows.Scan(&eventID, &sceneIdx, &cooldown, &onceFired, &arcID, &arcStep); err != nil {
+		if err := rows.Scan(&eventID, &sceneIdx, &cooldown, &onceFired); err != nil {
 			return hist, err
 		}
 		if _, ok := hist.Events[eventID]; !ok {
@@ -260,15 +255,7 @@ func (er *EventRepo) LoadHistory(ctx context.Context, tx *gorm.DB, runID uuid.UU
 				OnceFired:          onceFired,
 			}
 		}
-		if arcID.Valid {
-			if _, ok := hist.Arcs[arcID.String]; !ok {
-				hist.Arcs[arcID.String] = engine.ArcState{
-					LastStep:     int(arcStep.Int64),
-					LastSceneIdx: sceneIdx,
-					LastEventID:  eventID,
-				}
-			}
-		}
+		hist.Recent = append(hist.Recent, eventID)
 	}
 	return hist, nil
 }
@@ -278,14 +265,8 @@ func (er *EventRepo) Insert(ctx context.Context, tx *gorm.DB, rec EventInstanceR
 	if tx != nil {
 		db = tx.WithContext(ctx)
 	}
-	var arcID any
-	if rec.ArcID == "" {
-		arcID = nil
-	} else {
-		arcID = rec.ArcID
-	}
 	return db.Exec(`INSERT INTO event_instances(run_id, survivor_id, event_id, world_day, scene_idx, cooldown_until_scene, arc_id, arc_step, once_fired) VALUES (?,?,?,?,?,?,?,?,?)`,
-		rec.RunID, rec.SurvivorID, rec.EventID, rec.WorldDay, rec.SceneIdx, rec.CooldownUntilScene, arcID, rec.ArcStep, rec.OnceFired).Error
+		rec.RunID, rec.SurvivorID, rec.EventID, rec.WorldDay, rec.SceneIdx, rec.CooldownUntilScene, nil, 0, rec.OnceFired).Error
 }
 
 func (nr *NarrationCacheRepo) Get(ctx context.Context, tx *gorm.DB, runID uuid.UUID, kind string, hash []byte) (string, bool, error) {
@@ -479,14 +460,14 @@ func (ar *ArchiveRepo) List(ctx context.Context, runID uuid.UUID, limit int) ([]
 type SettingsRepo struct{ db *DB }
 
 func NewSettingsRepo(db *DB) *SettingsRepo { return &SettingsRepo{db: db} }
-func (sr *SettingsRepo) Upsert(ctx context.Context, runID uuid.UUID, scarcity bool, density, language, narrator string, difficulty string) error {
-	return sr.db.gorm.WithContext(ctx).Exec(`INSERT INTO settings(run_id, scarcity, text_density, language, narrator, difficulty) VALUES (?,?,?,?,?,?)
-	ON CONFLICT (run_id) DO UPDATE SET scarcity=EXCLUDED.scarcity, text_density=EXCLUDED.text_density, language=EXCLUDED.language, narrator=EXCLUDED.narrator, difficulty=EXCLUDED.difficulty`, runID, scarcity, density, language, narrator, difficulty).Error
+func (sr *SettingsRepo) Upsert(ctx context.Context, runID uuid.UUID, scarcity bool, density, language, narrator, difficulty, theme string) error {
+	return sr.db.gorm.WithContext(ctx).Exec(`INSERT INTO settings(run_id, scarcity, text_density, language, narrator, difficulty, theme) VALUES (?,?,?,?,?,?,?)
+	ON CONFLICT (run_id) DO UPDATE SET scarcity=EXCLUDED.scarcity, text_density=EXCLUDED.text_density, language=EXCLUDED.language, narrator=EXCLUDED.narrator, difficulty=EXCLUDED.difficulty, theme=EXCLUDED.theme`, runID, scarcity, density, language, narrator, difficulty, theme).Error
 }
 
-// Backwards-compatible wrapper for existing call sites without difficulty (defaults to 'standard').
+// Backwards-compatible wrapper for existing call sites without difficulty/theme (defaults to standard + catppuccin).
 func (sr *SettingsRepo) UpsertLegacy(ctx context.Context, runID uuid.UUID, scarcity bool, density, language, narrator string) error {
-	return sr.Upsert(ctx, runID, scarcity, density, language, narrator, "standard")
+	return sr.Upsert(ctx, runID, scarcity, density, language, narrator, "standard", "catppuccin")
 }
 
 func (sr *SettingsRepo) ToggleScarcity(ctx context.Context, runID uuid.UUID) error {
@@ -503,13 +484,41 @@ func (sr *SettingsRepo) CycleDifficulty(ctx context.Context, runID uuid.UUID) er
 }
 
 // Get retrieves current settings for run.
+
 func (sr *SettingsRepo) Get(ctx context.Context, runID uuid.UUID) (Settings, error) {
-	row := sr.db.gorm.WithContext(ctx).Raw(`SELECT run_id, scarcity, text_density, language, narrator, COALESCE(difficulty,'standard') FROM settings WHERE run_id = ?`, runID).Row()
+	row := sr.db.gorm.WithContext(ctx).Raw(`SELECT run_id, scarcity, text_density, language, narrator, COALESCE(difficulty,'standard'), COALESCE(theme,'catppuccin') FROM settings WHERE run_id = ?`, runID).Row()
 	var s Settings
-	if err := row.Scan(&s.RunID, &s.Scarcity, &s.TextDensity, &s.Language, &s.Narrator, &s.Difficulty); err != nil {
+	if err := row.Scan(&s.RunID, &s.Scarcity, &s.TextDensity, &s.Language, &s.Narrator, &s.Difficulty, &s.Theme); err != nil {
 		return Settings{}, err
 	}
 	return s, nil
+}
+
+type Tip struct {
+	ID        uuid.UUID
+	Text      string
+	CreatedAt time.Time
+}
+
+type TipRepo struct{ db *DB }
+
+func NewTipRepo(db *DB) *TipRepo { return &TipRepo{db: db} }
+
+func (tr *TipRepo) All(ctx context.Context) ([]Tip, error) {
+	rows, err := tr.db.gorm.WithContext(ctx).Raw(`SELECT id, text, created_at FROM tips ORDER BY created_at`).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tips []Tip
+	for rows.Next() {
+		var tip Tip
+		if err := rows.Scan(&tip.ID, &tip.Text, &tip.CreatedAt); err != nil {
+			return nil, err
+		}
+		tips = append(tips, tip)
+	}
+	return tips, nil
 }
 
 // SurvivorRepo Update method for transactional survivor state persistence.
@@ -572,6 +581,7 @@ type Settings struct {
 	Language    string
 	Narrator    string
 	Difficulty  string
+	Theme       string
 }
 
 type SceneWithOutcome struct {

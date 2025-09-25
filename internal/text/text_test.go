@@ -7,33 +7,6 @@ import (
 	"github.com/DaanHessen/walker-tui/internal/engine"
 )
 
-func TestMinimalFallbackScenePreArrival_NoBannedTerms(t *testing.T) {
-	m := &MinimalFallbackNarrator{}
-	state := map[string]any{
-		"region": "Test Region",
-		"time_of_day": "morning",
-		"weather": "clear",
-		"season": "spring",
-		"lad": 5,
-		"world_day": 2,
-		"infected_present": false,
-		"inventory": engine.Inventory{FoodDays: 1.0, WaterLiters: 1.0},
-	}
-	s, err := m.Scene(nil, state)
-	if err != nil {
-		t.Fatalf("scene error: %v", err)
-	}
-	for _, banned := range []string{"infected", "zombie", "horde"} {
-		if containsFold(s, banned) {
-			t.Fatalf("fallback scene mentions banned term pre-arrival: %s", banned)
-		}
-	}
-}
-
-func containsFold(hay, needle string) bool {
-	return strings.Contains(strings.ToLower(hay), strings.ToLower(needle))
-}
-
 func TestSceneCacheKeyDeterminism(t *testing.T) {
 	state1 := map[string]any{"a": 1, "b": "x"}
 	state2 := map[string]any{"a": 1, "b": "x"}

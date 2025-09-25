@@ -1,106 +1,76 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
+	"sort"
 	"strings"
-	"sync"
-
-	"gopkg.in/yaml.v3"
 )
 
-type Event struct {
-	ID              string            `yaml:"id"`
-	Name            string            `yaml:"name"`
-	Tags            []string          `yaml:"tags"`
-	Tier            string            `yaml:"tier"`
-	Rarity          string            `yaml:"rarity"`
-	CooldownScenes  int               `yaml:"cooldown_scenes"`
-	OncePerRun      bool              `yaml:"once_per_run"`
-	Pre             EventPre          `yaml:"preconditions"`
-	EffectsOnSelect effectSpec        `yaml:"effects_on_select"`
-	Choices         []EventChoice     `yaml:"choices"`
-	OutcomeDeltas   map[string]string `yaml:"outcome_deltas"`
-	Arc             *EventArc         `yaml:"arc"`
+// DirectorPlanner represents an AI director capable of selecting an event and emitting choice scaffolding.
+type DirectorPlanner interface {
+	PlanEvent(ctx context.Context, req DirectorRequest) (DirectorPlan, error)
 }
 
-type EventPre struct {
-	LADRelation   string         `yaml:"lad_relation"`
-	LocationTypes []string       `yaml:"location_types"`
-	TimeOfDay     []string       `yaml:"time_of_day"`
-	MinDay        *int           `yaml:"min_day"`
-	MaxDay        *int           `yaml:"max_day"`
-	ForbidConds   []string       `yaml:"forbid_conditions"`
-	RequireConds  []string       `yaml:"require_conditions"`
-	SkillsAnyMin  map[string]int `yaml:"skills_any_min"`
+// DirectorRequest packages survivor context and currently eligible events for the planner.
+type DirectorRequest struct {
+	State         map[string]any   `json:"state"`
+	Available     []EventBlueprint `json:"available_events"`
+	History       HistorySnapshot  `json:"history"`
+	SceneIndex    int              `json:"scene_index"`
+	Scarcity      bool             `json:"scarcity"`
+	TextDensity   string           `json:"text_density"`
+	Difficulty    Difficulty       `json:"difficulty"`
+	InfectedLocal bool             `json:"infected_local"`
 }
 
-type EventChoice struct {
-	ID         string            `yaml:"id"`
-	Label      string            `yaml:"label"`
-	Archetypes []string          `yaml:"archetypes"`
-	BaseRisk   string            `yaml:"base_risk"`
-	BaseCost   EventCostSpec     `yaml:"base_cost"`
-	Gating     ChoiceGating      `yaml:"gating"`
-	Outcome    map[string]string `yaml:"outcome_deltas"`
-	Effects    effectSpec        `yaml:"effects_on_resolve"`
+// HistorySnapshot conveys recent director decisions to help avoid repetition.
+type HistorySnapshot struct {
+	LastEvent string   `json:"last_event"`
+	Recent    []string `json:"recent"`
 }
 
-type EventCostSpec struct {
-	TimeMin    int `yaml:"time_min"`
-	Fatigue    int `yaml:"fatigue"`
-	Hunger     int `yaml:"hunger"`
-	Thirst     int `yaml:"thirst"`
-	Noise      int `yaml:"noise"`
-	Visibility int `yaml:"visibility"`
+// DirectorPlan is the planner's response describing the next event and its choices.
+type DirectorPlan struct {
+	EventID   string
+	EventName string
+	Guidance  string
+	Choices   []PlannedChoice
 }
 
-type ChoiceGating struct {
-	RequireConditions []string       `yaml:"require_conditions"`
-	ForbidConditions  []string       `yaml:"forbid_conditions"`
-	SkillsMin         map[string]int `yaml:"skills_min"`
+// PlannedChoice captures a single proposed choice in the director plan.
+type PlannedChoice struct {
+	Label     string
+	Archetype string
+	Cost      PlanCost
+	Risk      string
 }
 
-type effectSpec struct {
-	AddConditions    []Condition    `yaml:"add_conditions"`
-	RemoveConditions []Condition    `yaml:"remove_conditions"`
-	Meters           map[string]int `yaml:"meters"`
+// PlanCost mirrors Choice cost inputs provided by the director.
+type PlanCost struct {
+	Time    int
+	Fatigue int
+	Hunger  int
+	Thirst  int
 }
 
-func (e effectSpec) toChoiceEffect() (ChoiceEffect, error) {
-	effect := ChoiceEffect{}
-	if len(e.AddConditions) > 0 {
-		effect.AddConditions = append(effect.AddConditions, e.AddConditions...)
-	}
-	if len(e.RemoveConditions) > 0 {
-		effect.RemoveConditions = append(effect.RemoveConditions, e.RemoveConditions...)
-	}
-	if len(e.Meters) > 0 {
-		effect.MeterDeltas = make(map[Meter]int, len(e.Meters))
-		for raw, delta := range e.Meters {
-			meter := Meter(strings.TrimSpace(raw))
-			if !meter.Validate() {
-				return ChoiceEffect{}, fmt.Errorf("unknown meter %s in effect", raw)
-			}
-			effect.MeterDeltas[meter] += delta
-		}
-	}
-	return effect, nil
+// EventBlueprint holds local metadata for an event (no narrative text).
+type EventBlueprint struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Tier           string `json:"tier"` // pre_arrival | post_arrival | any
+	Scale          string `json:"scale"`
+	Weight         int    `json:"weight"`
+	CooldownScenes int    `json:"cooldown_scenes"`
+	OncePerRun     bool   `json:"once_per_run"`
 }
 
-type EventArc struct {
-	ID                 string   `yaml:"id"`
-	Step               int      `yaml:"step"`
-	NextMinDelayScenes int      `yaml:"next_min_delay_scenes"`
-	NextCandidates     []string `yaml:"next_candidates"`
-}
-
+// EventContext tracks the executed event blueprint plus planner guidance.
 type EventContext struct {
-	Event   Event
-	Choices []Choice
+	Event    EventBlueprint
+	Guidance string
+	Choices  []Choice
 }
 
 type EventState struct {
@@ -109,15 +79,9 @@ type EventState struct {
 	OnceFired          bool
 }
 
-type ArcState struct {
-	LastStep     int
-	LastSceneIdx int
-	LastEventID  string
-}
-
 type EventHistory struct {
 	Events map[string]EventState
-	Arcs   map[string]ArcState
+	Recent []string // most recent first
 }
 
 func (h EventHistory) eventState(id string) EventState {
@@ -127,399 +91,282 @@ func (h EventHistory) eventState(id string) EventState {
 	return h.Events[id]
 }
 
-func (h EventHistory) arcState(id string) (ArcState, bool) {
-	if id == "" || h.Arcs == nil {
-		return ArcState{}, false
+func (h EventHistory) snapshot(limit int) HistorySnapshot {
+	if limit <= 0 {
+		limit = 5
 	}
-	arc, ok := h.Arcs[id]
-	return arc, ok
+	snap := HistorySnapshot{}
+	if len(h.Recent) == 0 {
+		return snap
+	}
+	end := limit
+	if end > len(h.Recent) {
+		end = len(h.Recent)
+	}
+	snap.Recent = append([]string{}, h.Recent[:end]...)
+	snap.LastEvent = snap.Recent[0]
+	return snap
 }
 
-var (
-	cachedEvents []Event
-	eventsOnce   sync.Once
-	eventsErr    error
-	// testEventsOverride allows tests to inject a custom event set.
-	// When non-nil and returns ok=true, loadEvents will return the provided events.
-	testEventsOverride func() ([]Event, bool)
-)
-
-func loadEvents(dir string) ([]Event, error) {
-    // Test override hook: if present, bypass on-disk loading.
-    if testEventsOverride != nil {
-        if evs, ok := testEventsOverride(); ok {
-            return evs, nil
-        }
-    }
-    eventsOnce.Do(func() {
-        var out []Event
-        // Try several candidate roots so tests from subpackages find assets.
-        roots := []string{
-            dir,
-            filepath.Join("..", "..", dir),
-            filepath.Join("..", dir),
-        }
-        var walkErr error
-        var found bool
-        for _, root := range roots {
-            walkErr = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-                if err != nil {
-                    return err
-                }
-                if info.IsDir() {
-                    return nil
-                }
-                ext := strings.ToLower(filepath.Ext(path))
-                if ext != ".yaml" && ext != ".yml" {
-                    return nil
-                }
-                data, err := os.ReadFile(path)
-                if err != nil {
-                    return err
-                }
-                var ev Event
-                if err := yaml.Unmarshal(data, &ev); err != nil {
-                    return fmt.Errorf("%s: %w", path, err)
-                }
-                if ev.ID == "" {
-                    return fmt.Errorf("%s: missing id", path)
-                }
-                if len(ev.Choices) == 0 {
-                    return fmt.Errorf("%s: event %s has no choices", path, ev.ID)
-                }
-                out = append(out, ev)
-                found = true
-                return nil
-            })
-            if walkErr == nil && found {
-                break
-            }
-        }
-        if walkErr != nil {
-            eventsErr = walkErr
-            return
-        }
-        if len(out) == 0 {
-            eventsErr = errors.New("no events found in assets/events")
-            return
-        }
-        cachedEvents = out
-    })
-    return cachedEvents, eventsErr
+// Catalog of available event blueprints.
+var eventCatalog = []EventBlueprint{
+	{ID: "urban_supply_scramble", Name: "Urban Supply Scramble", Tier: "pre_arrival", Scale: "minor", Weight: 6, CooldownScenes: 1},
+	{ID: "checkpoint_tension", Name: "Checkpoint Tension", Tier: "pre_arrival", Scale: "major", Weight: 3, CooldownScenes: 2},
+	{ID: "rolling_blackout", Name: "Rolling Blackout", Tier: "pre_arrival", Scale: "minor", Weight: 4, CooldownScenes: 2},
+	{ID: "crowd_panic", Name: "Crowd Panic Surge", Tier: "pre_arrival", Scale: "major", Weight: 2, CooldownScenes: 3},
+	{ID: "quiet_hour", Name: "Uneasy Quiet Hour", Tier: "any", Scale: "minor", Weight: 6, CooldownScenes: 1},
+	{ID: "radio_distress", Name: "Radio Distress Call", Tier: "any", Scale: "minor", Weight: 4, CooldownScenes: 2},
+	{ID: "supply_convoy", Name: "Supply Convoy Sighting", Tier: "any", Scale: "minor", Weight: 4, CooldownScenes: 2},
+	{ID: "makeshift_clinic", Name: "Makeshift Clinic", Tier: "any", Scale: "minor", Weight: 3, CooldownScenes: 2},
+	{ID: "rooftop_signal", Name: "Rooftop Signal", Tier: "post_arrival", Scale: "minor", Weight: 3, CooldownScenes: 2},
+	{ID: "neighborhood_breach", Name: "Neighborhood Breach", Tier: "post_arrival", Scale: "major", Weight: 2, CooldownScenes: 3},
+	{ID: "street_hunt", Name: "Street Hunt", Tier: "post_arrival", Scale: "major", Weight: 2, CooldownScenes: 3},
+	{ID: "hospital_overrun", Name: "Hospital Overrun", Tier: "post_arrival", Scale: "major", Weight: 1, CooldownScenes: 4, OncePerRun: true},
+	{ID: "abandoned_lab", Name: "Abandoned Lab Floor", Tier: "post_arrival", Scale: "major", Weight: 1, CooldownScenes: 4, OncePerRun: true},
+	{ID: "shelter_dynamics", Name: "Shelter Dynamics", Tier: "any", Scale: "minor", Weight: 5, CooldownScenes: 1},
 }
 
-func rarityWeight(r string) int {
-	switch strings.ToLower(r) {
-	case "rare":
-		return 1
-	case "uncommon":
-		return 3
-	default:
-		return 5
+func catalogByID() map[string]EventBlueprint {
+	out := make(map[string]EventBlueprint, len(eventCatalog))
+	for _, ev := range eventCatalog {
+		out[ev.ID] = ev
 	}
+	return out
 }
 
-func SelectAndBuildChoices(stream *Stream, s *Survivor, cfg choiceConfig, history EventHistory, sceneIdx int) (*EventContext, ChoiceEffect, error) {
-	events, err := loadEvents("assets/events")
-	if err != nil {
-		return nil, ChoiceEffect{}, err
-	}
-	eventsByID := make(map[string]Event, len(events))
-	for _, ev := range events {
-		eventsByID[ev.ID] = ev
-	}
-	type candidate struct {
-		event   Event
-		choices []Choice
-		weight  int
-	}
-	candidates := make([]candidate, 0, len(events))
+func availableEventBlueprints(s *Survivor, history EventHistory, sceneIdx int) []EventBlueprint {
 	preArrival := s.Environment.WorldDay < s.Environment.LAD
-	for _, ev := range events {
-		if !tierMatches(ev.Tier, preArrival, *s) {
-			continue
+	catalog := catalogByID()
+	keys := make([]string, 0, len(catalog))
+	for id := range catalog {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	var out []EventBlueprint
+	for _, id := range keys {
+		bp := catalog[id]
+		if bp.OncePerRun {
+			state := history.eventState(bp.ID)
+			if state.OnceFired {
+				continue
+			}
 		}
-		if !eventPreconditionsSatisfied(ev.Pre, *s) {
-			continue
-		}
-		state := history.eventState(ev.ID)
-		if ev.OncePerRun && state.OnceFired {
-			continue
-		}
+		state := history.eventState(bp.ID)
 		if state.CooldownUntilScene > sceneIdx {
 			continue
 		}
-		if ev.Arc != nil {
-			arcState, ok := history.arcState(ev.Arc.ID)
-			step := ev.Arc.Step
-			if step <= 0 {
-				step = 1
+		switch strings.ToLower(bp.Tier) {
+		case "pre_arrival":
+			if !preArrival {
+				continue
 			}
-			if step > 1 {
-				if !ok || arcState.LastStep != step-1 {
-					continue
-				}
-				if sceneIdx-arcState.LastSceneIdx < ev.Arc.NextMinDelayScenes {
-					continue
-				}
-				if prev, okPrev := eventsByID[arcState.LastEventID]; okPrev && prev.Arc != nil && len(prev.Arc.NextCandidates) > 0 {
-					allowed := false
-					for _, nextID := range prev.Arc.NextCandidates {
-						if nextID == ev.ID {
-							allowed = true
-							break
-						}
-					}
-					if !allowed {
-						continue
-					}
-				}
-			} else {
-				if ok && arcState.LastStep >= 1 {
-					continue
-				}
+		case "post_arrival":
+			if preArrival {
+				continue
 			}
 		}
-		baseOutcome, err := parseOutcomeMap(ev.OutcomeDeltas)
-		if err != nil {
-			return nil, ChoiceEffect{}, fmt.Errorf("event %s outcome: %w", ev.ID, err)
-		}
-		choices, err := projectChoices(ev, *s, baseOutcome)
-		if err != nil {
-			return nil, ChoiceEffect{}, err
-		}
-		if len(choices) < 2 {
-			continue
-		}
-		if len(choices) > 6 {
-			choices = choices[:6]
-		}
-		weight := rarityWeight(ev.Rarity)
-		if weight <= 0 {
-			continue
-		}
-		candidates = append(candidates, candidate{event: ev, choices: choices, weight: weight})
+		out = append(out, bp)
 	}
-	if len(candidates) == 0 {
-		return nil, ChoiceEffect{}, errors.New("no eligible events for current state")
+	return out
+}
+
+// GenerateChoices asks the director for an event plan and converts it into mechanical choices.
+func GenerateChoices(ctx context.Context, planner DirectorPlanner, stream *Stream, s *Survivor, history EventHistory, sceneIdx int, opts ...ChoiceOption) ([]Choice, *EventContext, error) {
+	if planner == nil {
+		return nil, nil, errors.New("planner is nil")
 	}
-	total := 0
-	for _, c := range candidates {
-		total += c.weight
+	cfg := choiceConfig{}
+	for _, o := range opts {
+		o(&cfg)
 	}
-	pick := stream.Intn(total)
-	acc := 0
-	var sel candidate
-	for _, c := range candidates {
-		acc += c.weight
-		if pick < acc {
-			sel = c
-			break
-		}
+	available := availableEventBlueprints(s, history, sceneIdx)
+	if len(available) == 0 {
+		return nil, nil, errors.New("no eligible events for current state")
 	}
-	ctx := &EventContext{Event: sel.event, Choices: sel.choices}
-	for i := range ctx.Choices {
-		ctx.Choices[i].Index = i
+	req := DirectorRequest{
+		State:         s.NarrativeState(),
+		Available:     available,
+		History:       history.snapshot(5),
+		SceneIndex:    sceneIdx,
+		Scarcity:      cfg.scarcity,
+		TextDensity:   cfg.textDensity,
+		Difficulty:    cfg.difficulty,
+		InfectedLocal: s.Environment.Infected,
 	}
-	effect, err := sel.event.EffectsOnSelect.toChoiceEffect()
+	plan, err := planner.PlanEvent(ctx, req)
 	if err != nil {
-		return nil, ChoiceEffect{}, fmt.Errorf("event %s effects: %w", sel.event.ID, err)
+		return nil, nil, err
 	}
-	return ctx, effect, nil
+	catalog := catalogByID()
+	bp, ok := catalog[plan.EventID]
+	if !ok {
+		// allow fallback to name match when ID omitted
+		for _, candidate := range catalog {
+			if strings.EqualFold(candidate.Name, plan.EventName) {
+				bp = candidate
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return nil, nil, fmt.Errorf("planner selected unknown event %q", plan.EventID)
+	}
+	state := history.eventState(bp.ID)
+	if bp.OncePerRun && state.OnceFired {
+		return nil, nil, fmt.Errorf("planner selected once-per-run event %q already used", bp.ID)
+	}
+	if state.CooldownUntilScene > sceneIdx {
+		return nil, nil, fmt.Errorf("planner selected event %q still on cooldown", bp.ID)
+	}
+	if len(plan.Choices) < 2 || len(plan.Choices) > 6 {
+		return nil, nil, fmt.Errorf("planner returned %d choices (must be 2-6)", len(plan.Choices))
+	}
+	choices := make([]Choice, 0, len(plan.Choices))
+	for i, pc := range plan.Choices {
+		choice, err := buildChoiceFromPlan(bp.ID, i, pc)
+		if err != nil {
+			return nil, nil, fmt.Errorf("choice %d invalid: %w", i, err)
+		}
+		adjustRisk(&choice, *s, cfg)
+		choices = append(choices, choice)
+	}
+	ctxOut := &EventContext{
+		Event:    bp,
+		Guidance: plan.Guidance,
+		Choices:  choices,
+	}
+	return choices, ctxOut, nil
 }
 
-func tierMatches(tier string, preArrival bool, s Survivor) bool {
-	switch strings.ToLower(strings.TrimSpace(tier)) {
-	case "pre_arrival":
-		return preArrival
-	case "post_arrival":
-		return !preArrival
-	case "researcher":
-		return s.Environment.WorldDay < 0
-	case "any", "":
-		return true
+type archetypeProfile struct {
+	BaseOutcome ChoiceOutcome
+	BaseEffects ChoiceEffect
+	BaseCost    Cost
+}
+
+var archetypeProfiles = map[string]archetypeProfile{
+	"rest": {
+		BaseOutcome: ChoiceOutcome{
+			StatFatigue: {Min: -12, Max: -8},
+			StatMorale:  {Min: 1, Max: 2},
+		},
+		BaseCost: Cost{Time: 1},
+	},
+	"forage": {
+		BaseOutcome: ChoiceOutcome{
+			StatHunger:  {Min: -8, Max: -5},
+			StatThirst:  {Min: -6, Max: -3},
+			StatFatigue: {Min: 4, Max: 7},
+		},
+		BaseCost: Cost{Time: 1, Fatigue: 3},
+	},
+	"scout": {
+		BaseOutcome: ChoiceOutcome{
+			StatFatigue: {Min: 5, Max: 8},
+			StatMorale:  {Min: 1, Max: 2},
+		},
+		BaseCost: Cost{Time: 1, Fatigue: 4},
+	},
+	"organize": {
+		BaseOutcome: ChoiceOutcome{
+			StatMorale: {Min: 2, Max: 4},
+		},
+		BaseCost: Cost{Time: 1},
+	},
+	"barricade": {
+		BaseOutcome: ChoiceOutcome{
+			StatFatigue: {Min: 6, Max: 9},
+		},
+		BaseCost: Cost{Time: 1, Fatigue: 5},
+	},
+	"craft": {
+		BaseOutcome: ChoiceOutcome{
+			StatFatigue: {Min: 4, Max: 7},
+			StatMorale:  {Min: 1, Max: 2},
+		},
+		BaseCost: Cost{Time: 1, Fatigue: 4},
+	},
+	"diplomacy": {
+		BaseOutcome: ChoiceOutcome{
+			StatMorale: {Min: 2, Max: 4},
+		},
+		BaseCost: Cost{Time: 1},
+	},
+	"observe": {
+		BaseOutcome: ChoiceOutcome{
+			StatFatigue: {Min: 3, Max: 5},
+			StatMorale:  {Min: 1, Max: 1},
+		},
+		BaseCost: Cost{Time: 1, Fatigue: 2},
+	},
+}
+
+func buildChoiceFromPlan(eventID string, idx int, pc PlannedChoice) (Choice, error) {
+	label := strings.TrimSpace(pc.Label)
+	if label == "" {
+		return Choice{}, errors.New("label empty")
+	}
+	archetype := strings.ToLower(strings.TrimSpace(pc.Archetype))
+	profile, ok := archetypeProfiles[archetype]
+	if !ok {
+		return Choice{}, fmt.Errorf("unknown archetype %q", pc.Archetype)
+	}
+	risk, err := riskFromString(pc.Risk)
+	if err != nil {
+		return Choice{}, err
+	}
+	cost := profile.BaseCost
+	cost.Time = clampMin(pc.Cost.Time, 1, cost.Time)
+	cost.Fatigue = clampWithDefault(pc.Cost.Fatigue, cost.Fatigue)
+	cost.Hunger = clampWithDefault(pc.Cost.Hunger, cost.Hunger)
+	cost.Thirst = clampWithDefault(pc.Cost.Thirst, cost.Thirst)
+	outcome := cloneOutcome(profile.BaseOutcome)
+	choice := Choice{
+		Index:       idx,
+		ID:          fmt.Sprintf("%s:%d", eventID, idx),
+		Label:       label,
+		Cost:        cost,
+		Risk:        risk,
+		Archetype:   archetype,
+		Outcome:     outcome,
+		Effects:     profile.BaseEffects,
+		SourceEvent: eventID,
+	}
+	return choice, nil
+}
+
+func riskFromString(raw string) (RiskLevel, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "low", "risk_low", "r1", "":
+		return RiskLow, nil
+	case "moderate", "medium", "risk_moderate", "r2":
+		return RiskModerate, nil
+	case "high", "risk_high", "r3":
+		return RiskHigh, nil
 	default:
-		return true
+		return "", fmt.Errorf("unknown risk level %q", raw)
 	}
 }
 
-func eventPreconditionsSatisfied(pre EventPre, s Survivor) bool {
-	if rel := strings.ToLower(pre.LADRelation); rel != "" {
-		switch rel {
-		case "before":
-			if !(s.Environment.WorldDay < s.Environment.LAD) {
-				return false
-			}
-		case "arrival":
-			if s.Environment.WorldDay != s.Environment.LAD {
-				return false
-			}
-		case "after":
-			if !(s.Environment.WorldDay >= s.Environment.LAD) {
-				return false
-			}
+func clampMin(value, min int, fallback int) int {
+	if value <= 0 {
+		if fallback < min {
+			return min
 		}
+		return fallback
 	}
-	if len(pre.LocationTypes) > 0 && !containsFold(pre.LocationTypes, string(s.Environment.Location)) {
-		return false
+	if value < min {
+		return min
 	}
-	if len(pre.TimeOfDay) > 0 && !containsFold(pre.TimeOfDay, s.Environment.TimeOfDay) {
-		return false
-	}
-	if pre.MinDay != nil && s.Environment.WorldDay < *pre.MinDay {
-		return false
-	}
-	if pre.MaxDay != nil && s.Environment.WorldDay > *pre.MaxDay {
-		return false
-	}
-	if len(pre.ForbidConds) > 0 && survivorHasAnyCondition(s, pre.ForbidConds) {
-		return false
-	}
-	if len(pre.RequireConds) > 0 && !survivorHasAllConditions(s, pre.RequireConds) {
-		return false
-	}
-	if len(pre.SkillsAnyMin) > 0 {
-		satisfied := false
-		for skillName, min := range pre.SkillsAnyMin {
-			lvl := s.Skills[Skill(skillName)]
-			if lvl >= min {
-				satisfied = true
-				break
-			}
-		}
-		if !satisfied {
-			return false
-		}
-	}
-	return true
+	return value
 }
 
-func projectChoices(ev Event, s Survivor, base ChoiceOutcome) ([]Choice, error) {
-	var out []Choice
-	for _, ec := range ev.Choices {
-		if !choiceEligible(ec.Gating, s) {
-			continue
-		}
-		arch := ""
-		if len(ec.Archetypes) > 0 {
-			arch = ec.Archetypes[0]
-		}
-		risk := RiskLow
-		switch strings.ToLower(ec.BaseRisk) {
-		case "moderate":
-			risk = RiskModerate
-		case "high":
-			risk = RiskHigh
-		}
-		timeCost := ec.BaseCost.TimeMin
-		if timeCost <= 0 {
-			timeCost = 1
-		}
-		outcome := cloneOutcome(base)
-		if len(ec.Outcome) > 0 {
-			override, err := parseOutcomeMap(ec.Outcome)
-			if err != nil {
-				return nil, fmt.Errorf("event %s choice %s outcome: %w", ev.ID, ec.ID, err)
-			}
-			for k, v := range override {
-				outcome[k] = v
-			}
-		}
-		eff, err := ec.Effects.toChoiceEffect()
-		if err != nil {
-			return nil, fmt.Errorf("event %s choice %s effects: %w", ev.ID, ec.ID, err)
-		}
-		choice := Choice{
-			Index:     0,
-			ID:        fmt.Sprintf("%s:%s", ev.ID, ec.ID),
-			Label:     ec.Label,
-			Archetype: arch,
-			Risk:      risk,
-			Cost: Cost{
-				Time:    timeCost,
-				Fatigue: ec.BaseCost.Fatigue,
-				Hunger:  ec.BaseCost.Hunger,
-				Thirst:  ec.BaseCost.Thirst,
-			},
-			Outcome:     outcome,
-			Effects:     eff,
-			SourceEvent: ev.ID,
-		}
-		if survivorHasCondition(s, ConditionExhaustion) && isHighExertionChoice(choice) {
-			continue
-		}
-		out = append(out, choice)
+func clampWithDefault(value, fallback int) int {
+	if value == 0 {
+		return fallback
 	}
-	return out, nil
-}
-
-func choiceEligible(g ChoiceGating, s Survivor) bool {
-	if len(g.RequireConditions) > 0 && !survivorHasAllConditions(s, g.RequireConditions) {
-		return false
-	}
-	if len(g.ForbidConditions) > 0 && survivorHasAnyCondition(s, g.ForbidConditions) {
-		return false
-	}
-	if len(g.SkillsMin) > 0 {
-		for skillName, min := range g.SkillsMin {
-			lvl := s.Skills[Skill(skillName)]
-			if lvl < min {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func survivorHasAnyCondition(s Survivor, conds []string) bool {
-	for _, cond := range conds {
-		target := Condition(cond)
-		for _, existing := range s.Conditions {
-			if existing == target {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func survivorHasAllConditions(s Survivor, conds []string) bool {
-	if len(conds) == 0 {
-		return true
-	}
-	for _, cond := range conds {
-		target := Condition(cond)
-		found := false
-		for _, existing := range s.Conditions {
-			if existing == target {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-func parseOutcomeMap(raw map[string]string) (ChoiceOutcome, error) {
-	if len(raw) == 0 {
-		return make(ChoiceOutcome), nil
-	}
-	out := make(ChoiceOutcome, len(raw))
-	for key, expr := range raw {
-		stat, ok := parseStatKey(key)
-		if !ok {
-			return nil, fmt.Errorf("unknown stat %s", key)
-		}
-		rng, err := parseDeltaRange(expr)
-		if err != nil {
-			return nil, fmt.Errorf("stat %s: %w", key, err)
-		}
-		out[stat] = rng
-	}
-	return out, nil
+	return value
 }
 
 func cloneOutcome(src ChoiceOutcome) ChoiceOutcome {
@@ -533,84 +380,12 @@ func cloneOutcome(src ChoiceOutcome) ChoiceOutcome {
 	return out
 }
 
-func parseStatKey(key string) (StatKey, bool) {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case string(StatHealth):
-		return StatHealth, true
-	case string(StatHunger):
-		return StatHunger, true
-	case string(StatThirst):
-		return StatThirst, true
-	case string(StatFatigue):
-		return StatFatigue, true
-	case string(StatMorale):
-		return StatMorale, true
-	default:
-		return "", false
+// AllowedArchetypes returns the ordered list of archetypes supported by planner choices.
+func AllowedArchetypes() []string {
+	keys := make([]string, 0, len(archetypeProfiles))
+	for k := range archetypeProfiles {
+		keys = append(keys, k)
 	}
-}
-
-func parseDeltaRange(expr string) (DeltaRange, error) {
-	trimmed := strings.TrimSpace(expr)
-	if trimmed == "" {
-		return DeltaRange{Min: 0, Max: 0}, nil
-	}
-	if strings.Contains(trimmed, "..") {
-		parts := strings.SplitN(trimmed, "..", 2)
-		if len(parts) != 2 {
-			return DeltaRange{}, fmt.Errorf("invalid range %s", expr)
-		}
-		minVal, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-		if err != nil {
-			return DeltaRange{}, err
-		}
-		maxVal, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if err != nil {
-			return DeltaRange{}, err
-		}
-		if minVal > maxVal {
-			minVal, maxVal = maxVal, minVal
-		}
-		return DeltaRange{Min: minVal, Max: maxVal}, nil
-	}
-	val, err := strconv.Atoi(trimmed)
-	if err != nil {
-		return DeltaRange{}, err
-	}
-	return DeltaRange{Min: val, Max: val}, nil
-}
-
-func containsFold(list []string, target string) bool {
-	for _, item := range list {
-		if strings.EqualFold(strings.TrimSpace(item), target) {
-			return true
-		}
-	}
-	return false
-}
-
-// VerifyEventsPack ensures at least one valid event YAML exists in the directory.
-func VerifyEventsPack(dir string) error {
-	// Quick filesystem check first for clearer error
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("events: cannot read %s: %w", dir, err)
-	}
-	foundYAML := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if ext == ".yaml" || ext == ".yml" {
-			foundYAML = true
-			break
-		}
-	}
-	if !foundYAML {
-		return errors.New("events: no *.yaml in assets/events")
-	}
-	// Load/validate via loader to catch schema problems
-	_, err = loadEvents(dir)
-	return err
+	sort.Strings(keys)
+	return keys
 }
