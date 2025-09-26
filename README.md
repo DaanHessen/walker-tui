@@ -30,7 +30,7 @@ make run
 
 ## Your first moments
 
-When Zero Point starts, you'll see a character sheet for your randomly generated survivor—maybe Sarah, a 34-year-old nurse from the suburbs with a pragmatic streak and medical training. The world is at Day 0, but something is very wrong. News reports are scattered. People are on edge.
+When Zero Point starts, you'll see a character sheet for your randomly generated survivor - maybe Sarah, a 34-year-old nurse from the suburbs with a pragmatic streak and medical training. The world is at Day 0, but something is very wrong. News reports are scattered. People are on edge.
 
 The AI narrator describes your immediate situation in vivid second-person prose, then presents you with 2-6 choices. Each choice shows its costs (time, fatigue, hunger, thirst, risk level) and reflects your character's capabilities. That medical training? It affects what options you see and how successful you'll be.
 
@@ -85,10 +85,11 @@ Zero Point is built in Go with a PostgreSQL backend and uses the Bubble Tea fram
 
 ## License
 
-```
-She like to party like it's 1999
-Ayy, girl, don't be playin' with my–
-Now is not the time
-It's closin' time, what you want? Nevermind
-Hurry up, call the cut, don't be playin' 'round this time
-```
+Copyright (c) Daan Hessen 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to use, copy, modify, and distribute the Software for non-commercial purposes only, subject to the following conditions:
+
+1. The above copyright notice and this permission notice shall be included
+   in all copies or substantial portions of the Software.
+2. Commercial use of this Software is prohibited without explicit written
+   permission from the author.
